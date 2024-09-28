@@ -1,4 +1,7 @@
 #![allow(dead_code)]
 
-mod hex;
+mod digest;
+
 pub mod reference;
+
+pub use reference::Reference;

@@ -14,10 +14,13 @@ const DEFAULT_REPOSITORY: &str = "library";
 
 const DEFAULT_TAG: &str = "latest";
 
-type Result<'a, T> = std::result::Result<T, ParseError<'a>>;
+type Result<T> = std::result::Result<T, ParseError>;
 
-pub(super) fn parse(reference: &str) -> Result<'_, Reference<'_>> {
-    let (base, digest) = extract_digest(reference)?;
+pub(super) fn parse(reference: &str) -> Result<Reference<'_>> {
+    let (base, digest) = match reference.rsplit_once("@") {
+        None => (reference, None),
+        Some((base, d)) => (base, Some(Digest::parse(d)?)),
+    };
 
     // Extract the tag after the last `:`.
     //
@@ -54,34 +57,9 @@ pub(super) fn parse(reference: &str) -> Result<'_, Reference<'_>> {
     })
 }
 
-/// Extract the digest after the last `@` in the reference.
-fn extract_digest(reference: &str) -> Result<'_, (&str, Option<Digest<'_>>)> {
-    match reference.rsplit_once("@") {
-        None => Ok((reference, None)),
-
-        Some((base, suffix)) => {
-            let (digest, value, expected_size) = {
-                if let Some(d) = suffix.strip_prefix("sha256:") {
-                    (Digest::SHA256(d), d, 64)
-                } else if let Some(d) = suffix.strip_prefix("sha512:") {
-                    (Digest::SHA512(d), d, 128)
-                } else {
-                    return Err(ParseError::new(reference, "invalid digest algorithm"));
-                }
-            };
-
-            if value.len() != expected_size || value.contains(|c: char| !c.is_ascii_hexdigit()) {
-                return Err(ParseError::new(reference, "invalid digest"));
-            }
-
-            Ok((base, Some(digest)))
-        }
-    }
-}
-
 #[test]
 fn parse_valid_references() {
-    use crate::hex;
+    use crate::digest::hex_encode;
     use sha2::{Digest as _, Sha256, Sha512};
 
     macro_rules! check {
@@ -98,8 +76,8 @@ fn parse_valid_references() {
         };
     }
 
-    let sha256 = hex::encode(Sha256::digest(b"\x00\x01"));
-    let sha512 = hex::encode(Sha512::digest(b"\x01\x02"));
+    let sha256 = hex_encode(Sha256::digest(b"\x00\x01"));
+    let sha512 = hex_encode(Sha512::digest(b"\x01\x02"));
 
     check!(
         "foo",
@@ -154,27 +132,20 @@ fn parse_valid_references() {
 
 #[test]
 fn reject_invalid_digests() {
+    use crate::digest::DigestParseError;
+
     assert!(matches!(
         Reference::parse("debian:stable@md5:0000"),
-        Err(ParseError {
-            message: "invalid digest algorithm",
-            ..
-        }),
+        Err(ParseError::Digest(DigestParseError::InvalidDigestAlgorithm)),
     ));
 
     assert!(matches!(
         Reference::parse("debian:stable@sha256:0000"),
-        Err(ParseError {
-            message: "invalid digest",
-            ..
-        }),
+        Err(ParseError::Digest(DigestParseError::InvalidDigest)),
     ));
 
     assert!(matches!(
         Reference::parse(&format!("debian:stable@sha256:{:064}", "x")),
-        Err(ParseError {
-            message: "invalid digest",
-            ..
-        }),
+        Err(ParseError::Digest(DigestParseError::InvalidDigest)),
     ));
 }
