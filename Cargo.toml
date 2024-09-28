@@ -1,0 +1,15 @@
+[package]
+name = "oci-unpack"
+version = "0.1.0"
+edition = "2021"
+authors = ["ayosec@gmail.com"]
+license = "Apache-2.0"
+
+description = "Download and unpack OCI layers."
+keywords = ["bash"]
+
+readme = "README.md"
+documentation = "https://docs.rs/oci-unpack"
+repository = "https://github.com/ayosec/oci-unpack"
+
+[dependencies]
