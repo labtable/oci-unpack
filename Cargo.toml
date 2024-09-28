@@ -13,3 +13,4 @@ documentation = "https://docs.rs/oci-unpack"
 repository = "https://github.com/ayosec/oci-unpack"
 
 [dependencies]
+sha2 = "0.10.8"
