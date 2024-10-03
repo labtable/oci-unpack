@@ -11,7 +11,7 @@ use tiny_http::{Request, Server};
 pub(super) fn http_server<F>(mut handler: F) -> u16
 where
     F: FnMut(u16, Request) -> bool,
-    F: Send + 'static
+    F: Send + 'static,
 {
     let server = Server::http("127.1:0").expect("start HTTP server");
     let port = server.server_addr().to_ip().unwrap().port();

@@ -1,15 +1,21 @@
 use std::{net::SocketAddr, str::FromStr};
 
+use crate::EventHandler;
+
 use super::DownloadError;
 
 const USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
 
-pub(super) struct Client {
+pub(super) struct Client<E> {
+    event_handler: E,
     auth_token: Option<String>,
     host: String,
 }
 
-impl Client {
+impl<E> Client<E>
+where
+    E: EventHandler,
+{
     /// Create a new HTTP client to the host for `registry`.
     ///
     /// It tries to guess the URI scheme for the registry:
@@ -17,8 +23,9 @@ impl Client {
     /// * If it is a loopback IP (like `127.0.0.1`), or if the port
     ///   is `:80`, it uses `http://`.
     /// * In any other case, it uses `https://`.
-    pub fn new(registry: &str) -> Self {
+    pub fn new(registry: &str, event_handler: E) -> Self {
         Client {
+            event_handler,
             auth_token: None,
             host: format!("{}/{}", guess_scheme(registry), registry),
         }
@@ -50,6 +57,7 @@ impl Client {
         }
 
         // Try a request with no token.
+        self.event_handler.registry_request(request.url());
 
         let response = match request.clone().call() {
             Ok(r) => return Ok(r),
@@ -69,6 +77,8 @@ impl Client {
         else {
             return Err(ureq::Error::Status(401, response).into());
         };
+
+        self.event_handler.registry_auth(auth_request.url());
 
         #[derive(serde::Deserialize, Debug)]
         struct Tokens {
@@ -110,7 +120,7 @@ fn guess_scheme(registry: &str) -> &'static str {
         return if loopback { HTTP } else { HTTPS };
     }
 
-    return HTTPS;
+    HTTPS
 }
 
 /// Parse a `WWW-Authenticate` header and build the request to
@@ -134,13 +144,11 @@ fn build_auth_request(auth_spec: &str) -> Option<ureq::Request> {
         let (value, after) = value.strip_prefix('"')?.split_once('"')?;
 
         if key == "realm" {
-            let mut req = ureq::get(value);
-
-            for (k, v) in pending_params.drain(..) {
-                req = req.query(k, v);
-            }
-
-            request = Some(req)
+            request = Some(
+                pending_params
+                    .drain(..)
+                    .fold(ureq::get(value), |r, (k, v)| r.query(k, v)),
+            );
         } else {
             match request.take() {
                 Some(r) => request = Some(r.query(key, value)),
@@ -158,6 +166,10 @@ fn build_auth_request(auth_spec: &str) -> Option<ureq::Request> {
 #[test]
 fn request_token_after_unauthorized() {
     use tiny_http::{Header, Response};
+
+    struct VoidHandler;
+
+    impl EventHandler for VoidHandler {}
 
     let server_port = super::tests::http_server(|port, req| {
         const SERVICE: &str = "registry.docker.io";
@@ -216,7 +228,7 @@ fn request_token_after_unauthorized() {
         true
     });
 
-    let mut client = Client::new(&format!("127.0.0.1:{server_port}"));
+    let mut client = Client::new(&format!("127.0.0.1:{server_port}"), VoidHandler);
 
     // Send a regular request.
     //
@@ -224,5 +236,8 @@ fn request_token_after_unauthorized() {
     // receiving a 401.
 
     let response = client.get("test", None).expect("GET /test");
-    assert!(matches!(response.into_string().as_deref(), Ok("token=Bearer 00AA11BB")));
+    assert!(matches!(
+        response.into_string().as_deref(),
+        Ok("token=Bearer 00AA11BB")
+    ));
 }

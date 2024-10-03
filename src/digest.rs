@@ -1,9 +1,16 @@
 use std::fmt::Write;
 
-#[derive(Debug, PartialEq)]
-pub enum Digest<'a> {
-    SHA256(&'a str),
-    SHA512(&'a str),
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Algorithm {
+    SHA256,
+    SHA512,
+}
+
+#[derive(Debug, PartialEq, serde::Deserialize)]
+#[serde(try_from = "String")]
+pub struct Digest {
+    hash: String,
+    algorithm: Algorithm,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -15,20 +22,39 @@ pub enum DigestParseError {
     InvalidDigest,
 }
 
-impl<'a> Digest<'a> {
-    pub fn parse(digest: &'a str) -> Result<Self, DigestParseError> {
-        let (digest, value, expected_size) = {
-            if let Some(d) = digest.strip_prefix("sha256:") {
-                (Digest::SHA256(d), d, 64)
-            } else if let Some(d) = digest.strip_prefix("sha512:") {
-                (Digest::SHA512(d), d, 128)
+impl Digest {
+    pub fn hash(&self) -> &str {
+        &self.hash
+    }
+
+    pub fn hash_value(&self) -> &str {
+        self.hash
+            .split_once(':')
+            .map(|(_, h)| h)
+            .unwrap_or_default()
+    }
+
+    pub fn algorithm(&self) -> Algorithm {
+        self.algorithm
+    }
+}
+
+impl TryFrom<String> for Digest {
+    type Error = DigestParseError;
+
+    fn try_from(hash: String) -> Result<Self, Self::Error> {
+        let (algorithm, value, expected_size) = {
+            if let Some(h) = hash.strip_prefix("sha256:") {
+                (Algorithm::SHA256, h, 64)
+            } else if let Some(h) = hash.strip_prefix("sha512:") {
+                (Algorithm::SHA512, h, 128)
             } else {
                 return Err(DigestParseError::InvalidDigestAlgorithm);
             }
         };
 
         if value.len() == expected_size && value.chars().all(|c| c.is_ascii_hexdigit()) {
-            Ok(digest)
+            Ok(Digest { hash, algorithm })
         } else {
             Err(DigestParseError::InvalidDigest)
         }

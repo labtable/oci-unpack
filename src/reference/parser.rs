@@ -19,7 +19,7 @@ type Result<T> = std::result::Result<T, ParseError>;
 pub(super) fn parse(reference: &str) -> Result<Reference<'_>> {
     let (base, digest) = match reference.rsplit_once("@") {
         None => (reference, None),
-        Some((base, d)) => (base, Some(Digest::parse(d)?)),
+        Some((base, d)) => (base, Some(Digest::try_from(d.to_owned())?)),
     };
 
     // Extract the tag after the last `:`.
@@ -115,7 +115,7 @@ fn parse_valid_references() {
             "example.com",
             Repository::Full("foo/bar"),
             "1.2.3",
-            Some(Digest::SHA256(&sha256))
+            Digest::try_from(format!("sha256:{sha256}")).ok()
         ]
     );
 
@@ -125,7 +125,7 @@ fn parse_valid_references() {
             "example.com:1234",
             Repository::Full("foo/bar"),
             "1.2.3",
-            Some(Digest::SHA512(&sha512))
+            Digest::try_from(format!("sha512:{sha512}")).ok()
         ]
     );
 }

@@ -8,7 +8,7 @@ pub struct Reference<'a> {
     pub registry: &'a str,
     pub repository: Repository<'a>,
     pub tag: &'a str,
-    pub digest: Option<Digest<'a>>,
+    pub digest: Option<Digest>,
 }
 
 #[derive(Debug, PartialEq)]
