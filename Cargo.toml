@@ -22,4 +22,5 @@ tiny_http = { version = "0.12.0", default-features = false }
 ureq = "2.10.1"
 
 [dev-dependencies]
+clap = { version = "4.5.19", features = ["derive"] }
 url = "2.5.2"
