@@ -59,7 +59,7 @@ pub(super) fn parse(reference: &str) -> Result<Reference<'_>> {
 
 #[test]
 fn parse_valid_references() {
-    use crate::digest::hex_encode;
+    use crate::digest::HexString;
     use sha2::{Digest as _, Sha256, Sha512};
 
     macro_rules! check {
@@ -76,8 +76,8 @@ fn parse_valid_references() {
         };
     }
 
-    let sha256 = hex_encode(Sha256::digest(b"\x00\x01"));
-    let sha512 = hex_encode(Sha512::digest(b"\x01\x02"));
+    let sha256 = HexString(Sha256::digest(b"\x00\x01"));
+    let sha512 = HexString(Sha512::digest(b"\x01\x02"));
 
     check!(
         "foo",

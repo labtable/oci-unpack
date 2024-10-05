@@ -1,4 +1,8 @@
-use std::{borrow::Cow, str::FromStr};
+use std::{
+    borrow::Cow,
+    io::{BufReader, Read},
+    str::FromStr,
+};
 
 use crate::{digest::Digest, EventHandler, Reference};
 
@@ -46,17 +50,24 @@ pub(super) fn get<E: EventHandler>(
     let architecture = architecture.unwrap_or(arch::DEFAULT);
     let os = os.unwrap_or(DEFAULT_OS);
 
+    enum Tag<'a> {
+        S(&'a str),
+        D(Cow<'a, Digest>),
+    }
+
     let accept = mime::MediaType::ALL.join(", ");
 
-    let mut path: Cow<'_, str> = Cow::Borrowed(
-        reference
-            .digest
-            .as_ref()
-            .map(|d| d.hash())
-            .unwrap_or(reference.tag),
-    );
+    let mut tag = match reference.digest.as_ref() {
+        Some(d) => Tag::D(Cow::Borrowed(d)),
+        None => Tag::S(reference.tag),
+    };
 
     loop {
+        let path = match &tag {
+            Tag::S(s) => s,
+            Tag::D(s) => s.hash(),
+        };
+
         let response = http_client.get(
             &format!("v2/{}/manifests/{}", &reference.repository, path),
             Some(&accept),
@@ -67,14 +78,24 @@ pub(super) fn get<E: EventHandler>(
             .and_then(|h| MediaType::from_str(h).ok())
             .ok_or(DownloadError::InvalidContentType)?;
 
-        path = match content_type {
+        // If we have an expected digest, compute it during the download,
+        // and verify it when the download is completed.
+        let mut body: Box<dyn Read> = {
+            let response = response.into_reader();
+            match &tag {
+                Tag::D(d) => Box::new(BufReader::new(d.wrap_reader(response))),
+                Tag::S(_) => Box::new(response),
+            }
+        };
+
+        tag = match content_type {
             MediaType::DockerManifestList | MediaType::OciManifestIndex => {
-                parse_index(architecture, os, response)?.into()
+                Tag::D(Cow::Owned(parse_index(architecture, os, &mut body)?))
             }
 
             MediaType::DockerManifestV2 | MediaType::OciManifestV1 => {
                 // https://distribution.github.io/distribution/spec/manifest-v2-2/
-                return Ok(serde_json::from_reader(response.into_reader())?);
+                return Ok(serde_json::from_reader(&mut body)?);
             }
 
             _ => {
@@ -84,13 +105,18 @@ pub(super) fn get<E: EventHandler>(
     }
 }
 
-// https://distribution.github.io/distribution/spec/manifest-v2-2/#manifest-list
-// https://github.com/opencontainers/image-spec/blob/main/image-index.md
+/// Parse a manifest/index to get the digest for the specified architecture and
+/// operating system.
+///
+/// Refs:
+///
+/// * https://distribution.github.io/distribution/spec/manifest-v2-2/#manifest-list
+/// * https://github.com/opencontainers/image-spec/blob/main/image-index.md
 fn parse_index(
     architecture: &str,
     os: &str,
-    response: ureq::Response,
-) -> Result<String, DownloadError> {
+    response: &mut dyn Read,
+) -> Result<Digest, DownloadError> {
     #[derive(serde::Deserialize, Debug)]
     struct List {
         manifests: Vec<Item>,
@@ -108,11 +134,11 @@ fn parse_index(
         os: String,
     }
 
-    let List { manifests } = dbg!(serde_json::from_reader(response.into_reader())?);
+    let List { manifests } = dbg!(serde_json::from_reader(response)?);
     let item = manifests
         .into_iter()
         .find(|i| i.platform.architecture == architecture && i.platform.os == os)
         .ok_or(DownloadError::MissingArchitecture)?;
 
-    Ok(item.digest)
+    Ok(Digest::try_from(item.digest)?)
 }

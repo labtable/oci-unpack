@@ -7,7 +7,7 @@ mod tests;
 
 use std::path::PathBuf;
 
-use crate::reference::Reference;
+use crate::{digest::DigestParseError, reference::Reference};
 
 /// Handle to receive notification for events during the download process.
 #[expect(unused_variables)]
@@ -27,6 +27,9 @@ pub enum DownloadError {
 
     #[error("Missing authentication tokens.")]
     MissingTokens,
+
+    #[error("Invalid digest.")]
+    InvalidDigest(#[from] DigestParseError),
 
     #[error("Missing or invalid Content-Type.")]
     InvalidContentType,
