@@ -14,9 +14,14 @@ repository = "https://github.com/ayosec/oci-unpack"
 
 [dependencies]
 digest = { version = "0.10.7", default-features = false }
+flate2 = "1.0.34"
+landlock = { version = "0.4.1", optional = true }
+libc = "0"
+rustix = { version = "0.38.37", features = ["fs"] }
 serde = { version = "1.0.210", features = ["derive"] }
 serde_json = "1.0.128"
 sha2 = "0.10.8"
+tar = "0.4.42"
 thiserror = "1.0.64"
 tiny_http = { version = "0.12.0", default-features = false }
 ureq = "2.10.1"
@@ -24,3 +29,7 @@ ureq = "2.10.1"
 [dev-dependencies]
 clap = { version = "4.5.19", features = ["derive"] }
 url = "2.5.2"
+
+[features]
+default = ["sandbox"]
+sandbox = ["dep:landlock"]

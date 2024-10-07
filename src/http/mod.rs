@@ -1,43 +1,68 @@
-use std::{net::SocketAddr, str::FromStr};
+#[cfg(test)]
+mod tests;
 
-use crate::EventHandler;
+use std::{io::Read, net::SocketAddr, str::FromStr, sync::RwLock};
 
-use super::DownloadError;
+use crate::{digest::Digest, EventHandler, Reference};
 
 const USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
 
-pub(super) struct Client<E> {
-    event_handler: E,
-    auth_token: Option<String>,
+#[derive(thiserror::Error, Debug)]
+pub enum HttpError {
+    #[error("{0}")]
+    Client(#[from] Box<ureq::Error>),
+
+    #[error("Missing authentication tokens.")]
+    MissingTokens,
+
+    #[error("Invalid JSON: {0}")]
+    Json(#[from] serde_json::Error),
+}
+
+impl From<ureq::Error> for HttpError {
+    fn from(value: ureq::Error) -> Self {
+        HttpError::Client(Box::new(value))
+    }
+}
+
+pub(super) struct Client<'a, E> {
+    event_handler: &'a E,
+    auth_token: RwLock<Option<String>>,
     host: String,
 }
 
-impl<E> Client<E>
+impl<'a, E> Client<'a, E>
 where
     E: EventHandler,
 {
-    /// Create a new HTTP client to the host for `registry`.
+    /// Create a new HTTP client to the registry/image in `reference`.
     ///
     /// It tries to guess the URI scheme for the registry:
     ///
     /// * If it is a loopback IP (like `127.0.0.1`), or if the port
     ///   is `:80`, it uses `http://`.
     /// * In any other case, it uses `https://`.
-    pub fn new(registry: &str, event_handler: E) -> Self {
+    pub fn new(reference: &Reference, event_handler: &'a E) -> Self {
+        let host = format!(
+            "{}/{}/v2/{}",
+            guess_scheme(reference.registry),
+            reference.registry,
+            reference.repository
+        );
+
         Client {
             event_handler,
-            auth_token: None,
-            host: format!("{}/{}", guess_scheme(registry), registry),
+            auth_token: Default::default(),
+            host,
         }
     }
 
     /// Send a `GET` request to the registry.
-    pub fn get(
-        &mut self,
-        path: &str,
-        accept: Option<&str>,
-    ) -> Result<ureq::Response, DownloadError> {
-        let mut request = ureq::get(&format!("{}/{}", self.host, path));
+    ///
+    /// The path must not include the `v2/$image` prefix.
+    pub fn get(&self, path: &str, accept: Option<&str>) -> Result<ureq::Response, HttpError> {
+        let url = format!("{}/{}", self.host, path);
+        let mut request = ureq::get(&url);
         if let Some(accept) = accept {
             request = request.set("Accept", accept);
         }
@@ -45,16 +70,26 @@ where
         self.send(request)
     }
 
+    /// Send a `GET` request to download a blob.
+    pub fn download_blob(&self, blob: &Digest) -> Result<impl Read, HttpError> {
+        let response = self.get(&format!("blobs/{}", blob.hash()), None)?;
+        Ok(blob.wrap_reader(response.into_reader()))
+    }
+
     /// Send a request to the registry.
     ///
     /// If it responds with a `401` error, get the token from the
     /// URL in the `WWW-Authenticate` header.
-    fn send(&mut self, request: ureq::Request) -> Result<ureq::Response, DownloadError> {
+    fn send(&self, request: ureq::Request) -> Result<ureq::Response, HttpError> {
         let request = request.set("User-Agent", USER_AGENT);
 
-        if let Some(auth) = &self.auth_token {
+        let auth_token = self.auth_token.read().unwrap();
+        if let Some(auth) = auth_token.as_deref() {
             return Ok(request.set("Authorization", auth).call()?);
         }
+
+        drop(auth_token);
+        let mut auth_token = self.auth_token.write().unwrap();
 
         // Try a request with no token.
         self.event_handler.registry_request(request.url());
@@ -92,11 +127,12 @@ where
                 access_token: Some(t),
                 ..
             } => t,
-            _ => return Err(DownloadError::MissingTokens),
+            _ => return Err(HttpError::MissingTokens),
         };
 
         token.insert_str(0, "Bearer ");
-        self.auth_token = Some(token);
+        *auth_token = Some(token);
+        drop(auth_token);
 
         // Repeat the request, now that we have a token.
         self.send(request)
@@ -161,83 +197,4 @@ fn build_auth_request(auth_spec: &str) -> Option<ureq::Request> {
             t => t.strip_prefix(',')?,
         };
     }
-}
-
-#[test]
-fn request_token_after_unauthorized() {
-    use tiny_http::{Header, Response};
-
-    struct VoidHandler;
-
-    impl EventHandler for VoidHandler {}
-
-    let server_port = super::tests::http_server(|port, req| {
-        const SERVICE: &str = "registry.docker.io";
-        const SCOPE: &str = "repository:foo/bar:pull";
-
-        // Use the `url` crate to parse the request query.
-        let base_url = url::Url::parse("http://0").ok();
-        let url_parser = url::Url::options().base_url(base_url.as_ref());
-
-        let req_url = url_parser.parse(req.url()).unwrap();
-
-        let authorization = req
-            .headers()
-            .iter()
-            .find(|h| h.field.equiv("authorization"))
-            .map(|h| h.value.to_string());
-
-        let response = match (req_url.path(), authorization) {
-            ("/token", None) => {
-                // Verify the query.
-                for (k, v) in req_url.query_pairs() {
-                    if !((k == "service" && v == SERVICE) || (k == "scope" && v == SCOPE)) {
-                        panic!("Invalid query: {k:?} = {v:?}")
-                    }
-                }
-
-                let json = r#"
-                    {
-                      "access_token": "00AA11BB",
-                      "expires_in": "X",
-                      "issued_at": "Y",
-                      "token": "00AA11BB"
-                    }
-
-                "#;
-                Response::from_string(json)
-            }
-
-            ("/test", None) => {
-                let auth = format!(
-                    r#"Bearer realm="http://127.1:{port}/token",service="{SERVICE}",scope="{SCOPE}""#
-                );
-
-                Response::from_data(vec![])
-                    .with_status_code(401)
-                    .with_header(Header::from_bytes("WWW-Authenticate", auth).unwrap())
-            }
-
-            ("/test", Some(auth)) => Response::from_string(format!("token={auth}")),
-
-            _ => Response::from_string("Not Found").with_status_code(404),
-        };
-
-        req.respond(response).expect("Send response");
-
-        true
-    });
-
-    let mut client = Client::new(&format!("127.0.0.1:{server_port}"), VoidHandler);
-
-    // Send a regular request.
-    //
-    // The client must start the authentication process after
-    // receiving a 401.
-
-    let response = client.get("test", None).expect("GET /test");
-    assert!(matches!(
-        response.into_string().as_deref(),
-        Ok("token=Bearer 00AA11BB")
-    ));
 }

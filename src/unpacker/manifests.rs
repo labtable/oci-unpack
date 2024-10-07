@@ -4,18 +4,16 @@ use std::{
     str::FromStr,
 };
 
-use crate::{digest::Digest, EventHandler, Reference};
+use crate::{digest::Digest, EventHandler, MediaType, Reference};
 
-use super::{
-    mime::{self, MediaType},
-    DownloadError,
-};
+use super::UnpackError;
 
 #[derive(serde::Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct Blob {
     pub media_type: MediaType,
     pub digest: Digest,
+    pub size: usize,
 }
 
 #[derive(serde::Deserialize, Debug)]
@@ -35,18 +33,21 @@ mod arch {
     pub(super) const DEFAULT: &str = "riscv64";
 }
 
-#[cfg(windows)]
-const DEFAULT_OS: &str = "windows";
-
-#[cfg(not(windows))]
 const DEFAULT_OS: &str = "linux";
 
+/// Download the manifest for the `reference`.
+///
+/// It tries to download a manifest index to locate the image
+/// for the `architecture`/`os` pair.
+///
+/// If `reference` contains a digest (like `@sha256:...`), the
+/// manifest index is skipped.
 pub(super) fn get<E: EventHandler>(
     reference: &Reference,
     architecture: Option<&str>,
     os: Option<&str>,
-    http_client: &mut super::http::Client<E>,
-) -> Result<Manifest, DownloadError> {
+    http_client: &mut crate::http::Client<E>,
+) -> Result<Manifest, UnpackError> {
     let architecture = architecture.unwrap_or(arch::DEFAULT);
     let os = os.unwrap_or(DEFAULT_OS);
 
@@ -55,7 +56,7 @@ pub(super) fn get<E: EventHandler>(
         D(Cow<'a, Digest>),
     }
 
-    let accept = mime::MediaType::ALL.join(", ");
+    let accept = MediaType::ALL.join(", ");
 
     let mut tag = match reference.digest.as_ref() {
         Some(d) => Tag::D(Cow::Borrowed(d)),
@@ -68,15 +69,12 @@ pub(super) fn get<E: EventHandler>(
             Tag::D(s) => s.hash(),
         };
 
-        let response = http_client.get(
-            &format!("v2/{}/manifests/{}", &reference.repository, path),
-            Some(&accept),
-        )?;
+        let response = http_client.get(&format!("manifests/{}", path), Some(&accept))?;
 
         let content_type = response
             .header("Content-Type")
             .and_then(|h| MediaType::from_str(h).ok())
-            .ok_or(DownloadError::InvalidContentType)?;
+            .ok_or(UnpackError::MissingContentType)?;
 
         // If we have an expected digest, compute it during the download,
         // and verify it when the download is completed.
@@ -98,14 +96,14 @@ pub(super) fn get<E: EventHandler>(
                 return Ok(serde_json::from_reader(&mut body)?);
             }
 
-            _ => {
-                return Err(DownloadError::InvalidContentType);
+            unknown => {
+                return Err(UnpackError::InvalidContentType(unknown));
             }
         }
     }
 }
 
-/// Parse a manifest/index to get the digest for the specified architecture and
+/// Parse a manifest index to get the digest for the specified architecture and
 /// operating system.
 ///
 /// Refs:
@@ -116,7 +114,7 @@ fn parse_index(
     architecture: &str,
     os: &str,
     response: &mut dyn Read,
-) -> Result<Digest, DownloadError> {
+) -> Result<Digest, UnpackError> {
     #[derive(serde::Deserialize, Debug)]
     struct List {
         manifests: Vec<Item>,
@@ -134,11 +132,11 @@ fn parse_index(
         os: String,
     }
 
-    let List { manifests } = dbg!(serde_json::from_reader(response)?);
+    let List { manifests } = serde_json::from_reader(response)?;
     let item = manifests
         .into_iter()
         .find(|i| i.platform.architecture == architecture && i.platform.os == os)
-        .ok_or(DownloadError::MissingArchitecture)?;
+        .ok_or(UnpackError::MissingArchitecture)?;
 
     Ok(Digest::try_from(item.digest)?)
 }

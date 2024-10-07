@@ -1,9 +1,9 @@
-#![expect(dead_code)]
-
 mod digest;
-mod downloader;
+mod fs;
+mod http;
+mod unpacker;
 
 pub mod reference;
 
-pub use downloader::{download, EventHandler};
-pub use reference::Reference;
+pub use reference::{MediaType, Reference};
+pub use unpacker::{unpack, EventHandler, UnpackError};

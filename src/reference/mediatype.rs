@@ -1,16 +1,18 @@
 use std::{fmt, str::FromStr};
 
-/// Generate the `MediaType` enum, its `FromStr` implementation, and
-/// the associated constant `ALL` with all the valid MIME types.
-macro_rules! mime_strings {
-    ($($variant:ident = $mime:expr,)*) => {
-        #[derive(PartialEq, Debug)]
-        pub(super) enum MediaType {
+/// Generate the `MediaType` enum, its `FromStr` and `Display`
+/// implementations, and the associated constant `ALL` with all
+/// the valid values.
+macro_rules! define_media_types {
+    ($($variant:ident = $mediatype:expr,)*) => {
+        #[non_exhaustive]
+        #[derive(Copy, Clone, PartialEq, Debug)]
+        pub enum MediaType {
             $($variant),*
         }
 
         impl MediaType {
-            pub const ALL: &[&str] = &[ $($mime),* ];
+            pub const ALL: &[&str] = &[ $($mediatype),* ];
         }
 
         impl FromStr for MediaType {
@@ -18,26 +20,37 @@ macro_rules! mime_strings {
 
             fn from_str(s: &str) -> Result<Self, Self::Err> {
                 match s {
-                    $($mime => Ok(MediaType::$variant),)*
+                    $($mediatype => Ok(MediaType::$variant),)*
                     _ => Err(InvalidMediaType),
                 }
+            }
+        }
+
+        impl fmt::Display for MediaType {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                let display = match self {
+                    $(MediaType::$variant => $mediatype,)*
+                };
+
+                f.write_str(display)
             }
         }
     }
 }
 
-mime_strings!(
+define_media_types!(
     DockerFsTarGzip = "application/vnd.docker.image.rootfs.diff.tar.gzip",
     DockerImageV1 = "application/vnd.docker.container.image.v1+json",
     DockerManifestList = "application/vnd.docker.distribution.manifest.list.v2+json",
     DockerManifestV2 = "application/vnd.docker.distribution.manifest.v2+json",
     OciConfig = "application/vnd.oci.image.config.v1+json",
+    OciFsTar = "application/vnd.oci.image.layer.v1.tar",
     OciFsTarGzip = "application/vnd.oci.image.layer.v1.tar+gzip",
     OciManifestIndex = "application/vnd.oci.image.index.v1+json",
     OciManifestV1 = "application/vnd.oci.image.manifest.v1+json",
 );
 
-pub(super) struct InvalidMediaType;
+pub struct InvalidMediaType;
 
 struct MediaTypeVisitor;
 
@@ -45,14 +58,14 @@ impl<'de> serde::de::Visitor<'de> for MediaTypeVisitor {
     type Value = MediaType;
 
     fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-        formatter.write_str("Image/manifest MIME type.")
+        formatter.write_str("Image/manifest type.")
     }
 
     fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
     where
         E: serde::de::Error,
     {
-        MediaType::from_str(v).map_err(|_| E::custom(format!("Unknown MIME: {v}")))
+        MediaType::from_str(v).map_err(|_| E::custom(format!("Unknown type: {v}")))
     }
 }
 

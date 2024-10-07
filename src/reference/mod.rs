@@ -1,6 +1,9 @@
+mod mediatype;
 mod parser;
 
 use crate::digest::Digest;
+
+pub use mediatype::MediaType;
 
 /// Representation of a reference to an image in an OCI registry.
 #[derive(Debug, PartialEq)]
@@ -28,7 +31,7 @@ impl<'a> std::fmt::Display for Repository<'a> {
 
 #[derive(thiserror::Error, Debug)]
 pub enum ParseError {
-    #[error("digest")]
+    #[error("{0}")]
     Digest(#[from] crate::digest::DigestParseError),
 }
 

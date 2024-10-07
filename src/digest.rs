@@ -20,10 +20,10 @@ pub struct Digest {
 
 #[derive(thiserror::Error, Debug)]
 pub enum DigestParseError {
-    #[error("invalid digest algorithm")]
+    #[error("Invalid digest algorithm.")]
     InvalidDigestAlgorithm,
 
-    #[error("invalid digest")]
+    #[error("Invalid digest.")]
     InvalidDigest,
 }
 
