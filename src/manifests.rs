@@ -1,12 +1,11 @@
 use std::{
     borrow::Cow,
+    env::consts,
     io::{BufReader, Read},
     str::FromStr,
 };
 
-use crate::{digest::Digest, EventHandler, MediaType, Reference};
-
-use super::UnpackError;
+use crate::{digest::Digest, unpacker::UnpackError, EventHandler, MediaType, Reference};
 
 #[derive(serde::Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -22,19 +21,6 @@ pub(super) struct Manifest {
     pub layers: Vec<Blob>,
 }
 
-mod arch {
-    #[cfg(target_arch = "aarch64")]
-    pub(super) const DEFAULT: &str = "arm64";
-
-    #[cfg(target_arch = "x86_64")]
-    pub(super) const DEFAULT: &str = "amd64";
-
-    #[cfg(target_arch = "riscv64")]
-    pub(super) const DEFAULT: &str = "riscv64";
-}
-
-const DEFAULT_OS: &str = "linux";
-
 /// Download the manifest for the `reference`.
 ///
 /// It tries to download a manifest index to locate the image
@@ -48,8 +34,16 @@ pub(super) fn get<E: EventHandler>(
     os: Option<&str>,
     http_client: &mut crate::http::Client<E>,
 ) -> Result<Manifest, UnpackError> {
-    let architecture = architecture.unwrap_or(arch::DEFAULT);
-    let os = os.unwrap_or(DEFAULT_OS);
+    // Translate to golang architecture names.
+    let default_arch = match consts::ARCH {
+        "aarch64" => "arm64",
+        "x86" => "386",
+        "x86_64" => "amd64",
+        other => other,
+    };
+
+    let architecture = architecture.unwrap_or(default_arch);
+    let os = os.unwrap_or(consts::OS);
 
     enum Tag<'a> {
         S(&'a str),
@@ -66,7 +60,7 @@ pub(super) fn get<E: EventHandler>(
     loop {
         let path = match &tag {
             Tag::S(s) => s,
-            Tag::D(s) => s.hash(),
+            Tag::D(s) => s.source(),
         };
 
         let response = http_client.get(&format!("manifests/{}", path), Some(&accept))?;
@@ -87,7 +81,7 @@ pub(super) fn get<E: EventHandler>(
         };
 
         tag = match content_type {
-            MediaType::DockerManifestList | MediaType::OciManifestIndex => {
+            MediaType::DockerManifestList | MediaType::OciImageIndex => {
                 Tag::D(Cow::Owned(parse_index(architecture, os, &mut body)?))
             }
 
@@ -103,7 +97,7 @@ pub(super) fn get<E: EventHandler>(
     }
 }
 
-/// Parse a manifest index to get the digest for the specified architecture and
+/// Parse an image index to get the digest for the specified architecture and
 /// operating system.
 ///
 /// Refs:
@@ -117,11 +111,11 @@ fn parse_index(
 ) -> Result<Digest, UnpackError> {
     #[derive(serde::Deserialize, Debug)]
     struct List {
-        manifests: Vec<Item>,
+        manifests: Vec<Manifest>,
     }
 
     #[derive(serde::Deserialize, Debug)]
-    struct Item {
+    struct Manifest {
         digest: String,
         platform: Platform,
     }

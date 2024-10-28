@@ -5,18 +5,18 @@
 
 use super::*;
 
-/// Hostname to use when the reference is only the repository,
+/// Hostname to use when the reference is just the repository,
 /// like `debian` or `nixos/nix`.
 const DEFAULT_REGISTRY: &str = "registry-1.docker.io";
 
-/// Repository prefix when it does not contain an `/`.
-const DEFAULT_REPOSITORY: &str = "library";
+const DEFAULT_NAMESPACE: &str = "library";
 
 const DEFAULT_TAG: &str = "latest";
 
 type Result<T> = std::result::Result<T, ParseError>;
 
 pub(super) fn parse(reference: &str) -> Result<Reference<'_>> {
+    // Extract the digest after the last `@`.
     let (base, digest) = match reference.rsplit_once("@") {
         None => (reference, None),
         Some((base, d)) => (base, Some(Digest::try_from(d.to_owned())?)),
@@ -37,17 +37,21 @@ pub(super) fn parse(reference: &str) -> Result<Reference<'_>> {
         // `library` repository.
         None => (
             DEFAULT_REGISTRY,
-            Repository::Prefixed(DEFAULT_REPOSITORY, base),
+            Repository::components(DEFAULT_NAMESPACE, base),
         ),
 
         // There is a `.` before the `/`. Parse it as a hostname.
         Some((registry, repository)) if registry.contains('.') => {
-            (registry, Repository::Full(repository))
+            (registry, Repository::full(repository))
         }
 
-        // There is no `.` Assume it is a repository in the default registry.
-        Some(_) => (DEFAULT_REGISTRY, Repository::Full(base)),
+        // There is no `.`. Assume it is a repository in the default registry.
+        Some(_) => (DEFAULT_REGISTRY, Repository::full(base)),
     };
+
+    if repository.name().is_empty() {
+        return Err(ParseError::MissingRepository);
+    }
 
     Ok(Reference {
         registry,
@@ -64,8 +68,9 @@ fn parse_valid_references() {
 
     macro_rules! check {
         ($reference:expr, [ $registry:expr, $repository:expr, $tag:expr, $digest:expr ]) => {
+            let reference = $reference;
             assert_eq!(
-                Reference::parse($reference).unwrap(),
+                Reference::try_from(<_ as AsRef<str>>::as_ref(&reference)).unwrap(),
                 Reference {
                     registry: $registry,
                     repository: $repository,
@@ -83,7 +88,7 @@ fn parse_valid_references() {
         "foo",
         [
             DEFAULT_REGISTRY,
-            Repository::Prefixed("library", "foo"),
+            Repository::components("library", "foo"),
             DEFAULT_TAG,
             None
         ]
@@ -93,7 +98,7 @@ fn parse_valid_references() {
         "foo/bar",
         [
             DEFAULT_REGISTRY,
-            Repository::Full("foo/bar"),
+            Repository::full("foo/bar"),
             DEFAULT_TAG,
             None
         ]
@@ -103,7 +108,7 @@ fn parse_valid_references() {
         "example.com:5678/foo/bar:1.2.3",
         [
             "example.com:5678",
-            Repository::Full("foo/bar"),
+            Repository::full("foo/bar"),
             "1.2.3",
             None
         ]
@@ -113,7 +118,7 @@ fn parse_valid_references() {
         &format!("example.com/foo/bar:1.2.3@sha256:{sha256}"),
         [
             "example.com",
-            Repository::Full("foo/bar"),
+            Repository::full("foo/bar"),
             "1.2.3",
             Digest::try_from(format!("sha256:{sha256}")).ok()
         ]
@@ -123,7 +128,7 @@ fn parse_valid_references() {
         &format!("example.com:1234/foo/bar:1.2.3@sha512:{sha512}"),
         [
             "example.com:1234",
-            Repository::Full("foo/bar"),
+            Repository::full("foo/bar"),
             "1.2.3",
             Digest::try_from(format!("sha512:{sha512}")).ok()
         ]
@@ -132,20 +137,20 @@ fn parse_valid_references() {
 
 #[test]
 fn reject_invalid_digests() {
-    use crate::digest::DigestParseError;
+    use crate::digest::DigestError;
 
     assert!(matches!(
-        Reference::parse("debian:stable@md5:0000"),
-        Err(ParseError::Digest(DigestParseError::InvalidDigestAlgorithm)),
+        Reference::try_from("debian:stable@md5:0000"),
+        Err(ParseError::InvalidDigest(DigestError::InvalidAlgorithm)),
     ));
 
     assert!(matches!(
-        Reference::parse("debian:stable@sha256:0000"),
-        Err(ParseError::Digest(DigestParseError::InvalidDigest)),
+        Reference::try_from("debian:stable@sha256:0000"),
+        Err(ParseError::InvalidDigest(DigestError::InvalidValue)),
     ));
 
     assert!(matches!(
-        Reference::parse(&format!("debian:stable@sha256:{:064}", "x")),
-        Err(ParseError::Digest(DigestParseError::InvalidDigest)),
+        Reference::try_from(format!("debian:stable@sha256:{:064}", "x").as_str()),
+        Err(ParseError::InvalidDigest(DigestError::InvalidValue)),
     ));
 }

@@ -93,7 +93,7 @@ fn request_token_after_unauthorized() {
     });
 
     let reference = format!("127.0.0.1:{server_port}/abc/def");
-    let reference = Reference::parse(&reference).unwrap();
+    let reference = Reference::try_from(reference.as_str()).unwrap();
     let client = crate::http::Client::new(&reference, &VoidHandler);
 
     // Send a regular request.

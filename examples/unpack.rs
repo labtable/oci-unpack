@@ -11,7 +11,7 @@ use std::{
 };
 
 use clap::Parser;
-use oci_unpack::{unpack, EventHandler, Reference};
+use oci_unpack::{EventHandler, Reference, Unpacker};
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -27,9 +27,9 @@ struct Args {
     #[arg(short, long)]
     can_skip_sandbox: bool,
 
-    /// Show HTTP requests.
+    /// Show debug messages.
     #[arg(short, long)]
-    debug_http: bool,
+    debug: bool,
 
     /// Image reference.
     image: String,
@@ -47,7 +47,7 @@ struct PrinterData {
 
 #[derive(Default)]
 struct Logger {
-    debug_http: bool,
+    debug: bool,
     is_terminal: bool,
     layers_received: AtomicU64,
     bytes_received: AtomicU64,
@@ -121,13 +121,13 @@ impl Logger {
 
 impl EventHandler for Logger {
     fn registry_request(&self, url: &str) {
-        if self.debug_http {
+        if self.debug {
             println!("GET {url}");
         }
     }
 
     fn registry_auth(&self, url: &str) {
-        if self.debug_http {
+        if self.debug {
             println!("AUTH {url}");
         }
     }
@@ -157,9 +157,15 @@ impl EventHandler for Logger {
         self.show_progress(false);
     }
 
+    fn layer_entry_skipped(&self, path: &std::path::Path, cause: &dyn fmt::Display) {
+        println!("{path:?}: {cause}");
+    }
+
     #[cfg(feature = "sandbox")]
     fn sandbox_status(&self, status: landlock::RestrictionStatus) {
-        println!("SANDBOX {status:?}");
+        if self.debug {
+            println!("SANDBOX {status:?}");
+        }
     }
 
     fn finished(&self) {
@@ -184,18 +190,25 @@ impl<T: Into<u64> + Copy> fmt::Display for HumanSize<T> {
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
-    unpack(
-        &Reference::parse(&args.image)?,
-        args.arch.as_deref(),
-        args.os.as_deref(),
-        Logger {
-            debug_http: args.debug_http,
-            is_terminal: std::io::stdout().is_terminal(),
-            ..Logger::default()
-        },
-        &args.target,
-        !args.can_skip_sandbox,
-    )?;
+    let event_handler = Logger {
+        debug: args.debug,
+        is_terminal: std::io::stdout().is_terminal(),
+        ..Logger::default()
+    };
+
+    let mut unpacker = Unpacker::new(Reference::try_from(args.image.as_str())?)
+        .event_handler(event_handler)
+        .require_sandbox(!args.can_skip_sandbox);
+
+    if let Some(arch) = &args.arch {
+        unpacker = unpacker.architecture(arch);
+    }
+
+    if let Some(os) = &args.os {
+        unpacker = unpacker.os(os);
+    }
+
+    unpacker.unpack(args.target)?;
 
     Ok(())
 }

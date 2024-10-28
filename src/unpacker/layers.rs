@@ -1,172 +1,444 @@
+use std::io::{
+    self, BufReader,
+    ErrorKind::{AlreadyExists, NotFound},
+    Read, Seek,
+};
+
 use std::{
-    cmp::min,
-    collections::VecDeque,
+    cell::Cell,
+    ffi::OsStr,
     fs::File,
-    io::{self, BufWriter, Read, Write},
-    path::Path,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Condvar, Mutex,
-    },
-    thread,
+    os::unix::ffi::OsStrExt,
+    path::{Path, PathBuf},
 };
 
-use rustix::fs::Mode;
-
-use crate::{fs::Directory, EventHandler, UnpackError};
-
-use super::{
-    extractor::extract,
-    manifests::{Blob, Manifest},
-    try_io,
+use rustix::{
+    fd::{AsFd, BorrowedFd, OwnedFd},
+    fs::Mode,
 };
 
-/// Maximum number of threads to download blobs in parallel.
-const QUEUE_LIMIT: usize = 8;
+use crate::{
+    fs::{normalize_path, DirFdCache, Directory},
+    manifests::Blob,
+    EventHandler, MediaType,
+};
 
-const CONFIG_FILE: &str = "config.json";
+use super::{try_io, DirectoryMetadata, UnpackError};
 
-pub(crate) fn get<E: EventHandler>(
-    http_client: crate::http::Client<E>,
-    manifest: Manifest,
-    target: &Path,
+const WHITEOUT_PREFIX: &[u8] = b".wh.";
+
+const WHITEOUT_OPAQUE: &[u8] = b".wh..opq";
+
+pub(crate) fn unpack_layer<E: EventHandler>(
+    blob_id: &str,
     event_handler: &E,
+    target: &Directory,
+    blob: &Blob,
+    mut tarball: File,
+    dirs_mtimes: &mut DirectoryMetadata,
 ) -> Result<(), UnpackError> {
-    let is_alive = AtomicBool::new(true);
+    let archive_len = try_io!(blob_id, {
+        let len = tarball.seek(io::SeekFrom::End(0))?;
+        tarball.rewind()?;
+        len
+    });
 
-    let target = try_io!(target, Directory::new(target));
+    // Track position (in bytes) to send progress notifications.
+    let tarball_position = Cell::new(0);
+    let tarball = PositionTracker {
+        count: &tarball_position,
+        reader: tarball,
+    };
 
-    event_handler.download_start(
-        manifest.layers.len(),
-        manifest.config.size + manifest.layers.iter().fold(0, |a, l| a + l.size),
-    );
+    // Uncompress and extract files from the archive.
+    let reader: Box<dyn Read> = match blob.media_type {
+        MediaType::DockerImageV1 | MediaType::OciConfig => {
+            // Configuration files are just written to disk.
+            return Ok(());
+        }
 
-    let download_tasks: Vec<_> = [(&manifest.config, Some(Path::new(CONFIG_FILE)))]
-        .into_iter()
-        .chain(manifest.layers.iter().map(|l| (l, None)))
-        .map(|(blob, filename)| Download::new(blob, filename))
-        .collect();
+        MediaType::DockerFsTarGzip | MediaType::OciFsTarGzip => {
+            Box::new(flate2::read::GzDecoder::new(tarball))
+        }
 
-    // Download blobs in a thread pool.
-    let pending: VecDeque<_> = download_tasks.iter().collect();
-    let pending = Mutex::new(pending);
+        MediaType::OciFsTar => Box::new(BufReader::new(tarball)),
 
-    thread::scope(|scope| {
-        let alive_tracker = AliveTracker(&is_alive);
+        unknown => return Err(UnpackError::InvalidContentType(unknown)),
+    };
 
-        // Launch a thread pool to download the blobs.
-        for _ in 0..min(QUEUE_LIMIT, download_tasks.len()) {
-            scope.spawn(|| {
-                while let Ok(Some(task)) = pending.lock().map(|mut q| q.pop_front()) {
-                    task.set(run_download(
-                        &target,
-                        task,
-                        &http_client,
-                        event_handler,
-                        &is_alive,
-                    ));
+    event_handler.layer_start(archive_len);
+
+    let mut archive = tar::Archive::new(reader);
+    let mut ctx = Context::new(event_handler, blob_id, target, dirs_mtimes);
+
+    for entry in try_io!(blob_id, archive.entries()) {
+        event_handler.layer_progress(tarball_position.get());
+        ctx.unpack(entry)?;
+    }
+
+    event_handler.layer_progress(tarball_position.get());
+
+    Ok(())
+}
+
+struct InvalidEntryType(tar::EntryType);
+
+impl std::fmt::Display for InvalidEntryType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Invalid entry type: {:?}", self.0)
+    }
+}
+
+/// Count how many bytes have been read from `reader`.
+struct PositionTracker<'a, R> {
+    count: &'a Cell<usize>,
+    reader: R,
+}
+
+impl<T: Read> Read for PositionTracker<'_, T> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = self.reader.read(buf)?;
+        self.count.set(self.count.get() + n);
+        Ok(n)
+    }
+}
+
+struct Context<'a, E> {
+    event_handler: &'a E,
+    blob_id: &'a str,
+    target: &'a Directory,
+    dirs_cache: DirFdCache<'a>,
+    dirs_mtimes: &'a mut DirectoryMetadata,
+    cached_link_dirfd: Option<(PathBuf, OwnedFd)>,
+}
+
+impl<'a, E: EventHandler> Context<'a, E> {
+    fn new(
+        event_handler: &'a E,
+        blob_id: &'a str,
+        target: &'a Directory,
+        dirs_mtimes: &'a mut DirectoryMetadata,
+    ) -> Self {
+        Self {
+            event_handler,
+            blob_id,
+            target,
+            dirs_cache: DirFdCache::new(target),
+            dirs_mtimes,
+            cached_link_dirfd: None,
+        }
+    }
+
+    fn path_fd(&mut self, path: impl AsRef<Path>) -> io::Result<BorrowedFd<'_>> {
+        Ok(self.dirs_cache.get(path, true)?)
+    }
+
+    fn unpack(&mut self, entry: io::Result<tar::Entry<impl Read>>) -> Result<(), UnpackError> {
+        let entry = try_io!(self.blob_id, entry);
+
+        let entry_path = try_io!(self.blob_id, entry.path());
+        let entry_path = entry_path.as_ref();
+
+        let (parent_path, file_name) = try_io!(entry_path, normalize_path(entry_path));
+
+        // Handle whiteout entries.
+        //
+        // The cache for directory file descriptors is reset after removing
+        // any entry.
+        if let Some(whiteout) = file_name
+            .as_os_str()
+            .as_bytes()
+            .strip_prefix(WHITEOUT_PREFIX)
+        {
+            let parent_fd = try_io!(parent_path, self.path_fd(&parent_path));
+            try_io!(entry_path, Self::process_whiteout(parent_fd, whiteout));
+            self.dirs_cache.clear();
+            return Ok(());
+        }
+
+        // Unpack the entry.
+        try_io!(file_name, {
+            match entry.header().entry_type() {
+                tar::EntryType::Directory => self.unpack_dir(parent_path, &file_name, entry)?,
+
+                tar::EntryType::Regular => self.unpack_regular(parent_path, &file_name, entry)?,
+
+                tar::EntryType::Symlink | tar::EntryType::Link => {
+                    self.unpack_link(self.target.as_fd(), parent_path, &file_name, entry)?
                 }
-            });
-        }
 
-        // Get downloaded files and extract them.
-        for task in &download_tasks {
-            try_io!(
-                task.blob.digest.hash(),
-                extract(event_handler, &target, task.blob, task.get()?),
-            )
-        }
-
-        drop(alive_tracker);
-
-        event_handler.finished();
+                other => {
+                    self.event_handler
+                        .layer_entry_skipped(entry.path()?.as_ref(), &InvalidEntryType(other));
+                }
+            }
+        });
 
         Ok(())
-    })
-}
-
-/// Set the `AtomicBool` instance to `false` when this instance is
-/// dropped (for example, after `panic!`).
-struct AliveTracker<'a>(&'a AtomicBool);
-
-impl Drop for AliveTracker<'_> {
-    fn drop(&mut self) {
-        self.0.store(false, Ordering::Relaxed);
-    }
-}
-
-struct Download<'a> {
-    blob: &'a Blob,
-    filename: Option<&'a Path>,
-    result: Mutex<Option<Result<File, UnpackError>>>,
-    notifier: Condvar,
-}
-
-impl<'a> Download<'a> {
-    fn new(blob: &'a Blob, filename: Option<&'a Path>) -> Self {
-        Self {
-            blob,
-            filename,
-            result: Default::default(),
-            notifier: Condvar::new(),
-        }
     }
 
-    fn set(&self, result: Result<File, UnpackError>) {
-        let mut lock = self.result.lock().unwrap();
-        *lock = Some(result);
-        self.notifier.notify_one();
-    }
+    fn unpack_dir(
+        &mut self,
+        parent_path: impl AsRef<Path>,
+        file_name: &Path,
+        entry: tar::Entry<impl Read>,
+    ) -> io::Result<()> {
+        use rustix::fs;
 
-    fn get(&self) -> Result<File, UnpackError> {
-        let mut lock = self.result.lock().unwrap();
-        loop {
-            lock = match lock.take() {
-                Some(r) => return r,
-                None => self.notifier.wait(lock).unwrap(),
+        let header = entry.header();
+
+        let parent_fd = self.path_fd(parent_path)?;
+        let result = fs::mkdirat(parent_fd, file_name, Mode::from_raw_mode(0o700));
+
+        if let Err(e) = result {
+            // Ignore the error if the directory already exists.
+            if e.kind() == AlreadyExists && !Self::is_directory(parent_fd, file_name)? {
+                return Err(e.into());
             }
         }
+
+        let (uid, gid) = Self::get_entry_owner(header)?;
+
+        // Store mtime/mode metadata to be applied later.
+        if let Ok(mtime) = header.mtime() {
+            let (mut path, b) = normalize_path(entry.path()?)?;
+            path.push(b);
+
+            let path_len = path.as_os_str().as_bytes().len();
+            let key = (usize::MAX - path_len, path);
+            let entry = super::DirectoryMetadataEntry {
+                mode: Mode::from_bits_retain(header.mode()?),
+                mtime,
+                uid,
+                gid,
+            };
+
+            self.dirs_mtimes.insert(key, entry);
+        }
+
+        Ok(())
     }
-}
 
-fn run_download<E: EventHandler>(
-    target: &Directory,
-    task: &Download,
-    http_client: &crate::http::Client<E>,
-    event_handler: &impl EventHandler,
-    is_alive: &AtomicBool,
-) -> Result<File, UnpackError> {
-    let digest = &task.blob.digest;
+    fn unpack_regular(
+        &mut self,
+        parent_path: impl AsRef<Path>,
+        file_name: &Path,
+        mut entry: tar::Entry<impl Read>,
+    ) -> io::Result<()> {
+        use rustix::fs;
 
-    let mut input = http_client.download_blob(digest)?;
+        let mode = Mode::from_bits_retain(entry.header().mode()? & 0o7777);
 
-    let fd = try_io!(
-        digest.hash(),
-        match task.filename {
-            Some(n) => target.create(n, Mode::RUSR | Mode::WUSR),
-            None => target.tmpfile(),
-        },
-    );
+        let parent_fd = self.path_fd(parent_path)?;
 
-    let mut file = File::from(fd);
+        let mut output = loop {
+            let result = fs::openat2(
+                parent_fd,
+                file_name,
+                fs::OFlags::CREATE | fs::OFlags::EXCL | fs::OFlags::WRONLY,
+                mode,
+                fs::ResolveFlags::BENEATH,
+            );
 
-    let mut data = [0u8; 8 * 1024];
-    let mut output = BufWriter::new(&mut file);
+            match result {
+                Ok(f) => break File::from(f),
 
-    loop {
-        if !is_alive.load(Ordering::Relaxed) {
-            return Err(UnpackError::Interrupted);
+                Err(e) if e.kind() == AlreadyExists => {
+                    fs::unlinkat(parent_fd, file_name, fs::AtFlags::empty())?;
+                }
+
+                Err(e) => return Err(e.into()),
+            }
+        };
+
+        io::copy(&mut entry, &mut output)?;
+
+        drop(output);
+
+        Self::set_owner(parent_fd, file_name, entry.header())?;
+
+        let mtime = Self::make_timestamps(entry.header().mtime()?);
+        fs::utimensat(parent_fd, file_name, &mtime, fs::AtFlags::SYMLINK_NOFOLLOW)?;
+
+        Ok(())
+    }
+
+    /// Unpack hard and symbolic links.
+    fn unpack_link(
+        &mut self,
+        root_fd: BorrowedFd,
+        parent_path: impl AsRef<Path>,
+        file_name: &Path,
+        entry: tar::Entry<impl Read>,
+    ) -> io::Result<()> {
+        use rustix::fs;
+
+        let dest = match entry.link_name()? {
+            Some(dest) => dest,
+            None => return Err(io::Error::new(NotFound, "Missing link")),
+        };
+
+        let parent_fd = self.dirs_cache.get(parent_path, true)?;
+
+        let is_symlink = entry.header().entry_type().is_symlink();
+
+        loop {
+            let result = if is_symlink {
+                fs::symlinkat(dest.as_ref(), parent_fd, file_name)
+            } else {
+                // To create hard-links, get a file descriptor of the directory of
+                // the source (`old_path`). The descriptor is cached because some OCI
+                // images have multiple consecutive links in the same directory.
+
+                let (old_parent, old_name) = normalize_path(&dest)?;
+
+                let old_dirfd = match self.cached_link_dirfd.take() {
+                    Some((cached_path, fd)) if cached_path == old_parent => fd,
+
+                    _ => fs::openat2(
+                        root_fd,
+                        &old_parent,
+                        fs::OFlags::PATH | fs::OFlags::NOFOLLOW,
+                        fs::Mode::empty(),
+                        fs::ResolveFlags::IN_ROOT | fs::ResolveFlags::NO_MAGICLINKS,
+                    )?,
+                };
+
+                let result = fs::linkat(
+                    &old_dirfd,
+                    old_name,
+                    parent_fd,
+                    file_name,
+                    fs::AtFlags::empty(),
+                );
+
+                self.cached_link_dirfd = Some((old_parent, old_dirfd));
+
+                result
+            };
+
+            match result {
+                Ok(_) => break,
+
+                Err(e) if e.kind() == AlreadyExists => {
+                    fs::unlinkat(parent_fd, file_name, fs::AtFlags::empty())?;
+                }
+
+                Err(e) => return Err(e.into()),
+            }
         }
 
-        let n = try_io!(digest.hash(), input.read(&mut data[..]));
+        if is_symlink {
+            let header = entry.header();
 
-        if n == 0 {
-            drop(output);
-            return Ok(file);
+            let mtime = Self::make_timestamps(header.mtime()?);
+            fs::utimensat(parent_fd, file_name, &mtime, fs::AtFlags::SYMLINK_NOFOLLOW)?;
+
+            Self::set_owner(parent_fd, file_name, header)?;
         }
 
-        event_handler.download_progress_bytes(n);
+        Ok(())
+    }
 
-        try_io!(digest.hash(), output.write_all(&data[..n]));
+    fn is_directory(parent: BorrowedFd, file_name: &Path) -> io::Result<bool> {
+        let stat = rustix::fs::statat(parent, file_name, rustix::fs::AtFlags::empty())?;
+        Ok(stat.st_mode & libc::S_IFDIR != 0)
+    }
+
+    fn make_timestamps(mtime: u64) -> rustix::fs::Timestamps {
+        let mtime = rustix::fs::Timespec {
+            tv_sec: i64::try_from(mtime).unwrap_or_default(),
+            tv_nsec: 0,
+        };
+
+        rustix::fs::Timestamps {
+            last_access: mtime,
+            last_modification: mtime,
+        }
+    }
+
+    /// Return the `uid, gid` of the entry.
+    ///
+    /// The owner is ignored if it is `0` (`root`).
+    fn get_entry_owner(header: &tar::Header) -> io::Result<(Option<u32>, Option<u32>)> {
+        Ok((
+            match header.uid().map(|id| id.try_into()) {
+                Ok(Ok(id)) if id > 0 => Some(id),
+                _ => None,
+            },
+            match header.gid().map(|id| id.try_into()) {
+                Ok(Ok(id)) if id > 0 => Some(id),
+                _ => None,
+            },
+        ))
+    }
+
+    /// Set user/group of an entry.
+    ///
+    /// Errors from `fchownat` are ignored.
+    fn set_owner(parent_fd: BorrowedFd, file_name: &Path, header: &tar::Header) -> io::Result<()> {
+        let (uid, gid) = Self::get_entry_owner(header)?;
+        crate::fs::change_owner(parent_fd, file_name, uid, gid, true)?;
+        Ok(())
+    }
+
+    /// Process whiteout entries, by removing files in the directory.
+    ///
+    /// The [1]specification indicates that whiteout entries _should_
+    /// appear before regular files. This implementation assumes that
+    /// the layer was built in such way.
+    ///
+    /// [1]: https://github.com/opencontainers/image-spec/blob/v1.0/layer.md#whiteouts
+    fn process_whiteout(dir: BorrowedFd, whiteout: &[u8]) -> io::Result<()> {
+        use rustix::fs;
+
+        fn remove(dir: BorrowedFd, path: &Path) -> io::Result<()> {
+            // Try to remove the file with `unlinkat`. If it fails
+            // because path is a directory, remove its children and
+            // then the directory itself.
+            //
+            // NotFound errors are ignored.
+
+            match fs::unlinkat(dir, path, fs::AtFlags::empty()) {
+                Err(e) if e.raw_os_error() == libc::EISDIR => (),
+                Err(e) if e.raw_os_error() == libc::ENOENT => return Ok(()),
+                result => return Ok(result?),
+            }
+
+            remove_subtree(dir, path)?;
+
+            match fs::unlinkat(dir, path, fs::AtFlags::REMOVEDIR) {
+                Err(e) if e.raw_os_error() != libc::ENOENT => Err(e.into()),
+                _ => Ok(()),
+            }
+        }
+
+        fn remove_subtree(dir: BorrowedFd, path: &Path) -> io::Result<()> {
+            let subdir = fs::openat2(
+                dir,
+                path,
+                fs::OFlags::RDONLY | fs::OFlags::DIRECTORY | fs::OFlags::NOFOLLOW,
+                Mode::empty(),
+                fs::ResolveFlags::BENEATH,
+            )?;
+
+            let mut entries = fs::Dir::read_from(&subdir)?;
+            while let Some(Ok(entry)) = entries.read() {
+                let name = entry.file_name().to_bytes();
+                if name != b"." && name != b".." {
+                    remove(subdir.as_fd(), Path::new(OsStr::from_bytes(name)))?;
+                }
+            }
+
+            Ok(())
+        }
+
+        let path = Path::new(OsStr::from_bytes(whiteout));
+
+        if whiteout == WHITEOUT_OPAQUE {
+            remove_subtree(dir, Path::new("."))
+        } else {
+            remove(dir, path)
+        }
     }
 }

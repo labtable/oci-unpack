@@ -44,7 +44,7 @@ where
     /// * In any other case, it uses `https://`.
     pub fn new(reference: &Reference, event_handler: &'a E) -> Self {
         let host = format!(
-            "{}/{}/v2/{}",
+            "{}{}/v2/{}",
             guess_scheme(reference.registry),
             reference.registry,
             reference.repository
@@ -72,7 +72,7 @@ where
 
     /// Send a `GET` request to download a blob.
     pub fn download_blob(&self, blob: &Digest) -> Result<impl Read, HttpError> {
-        let response = self.get(&format!("blobs/{}", blob.hash()), None)?;
+        let response = self.get(&format!("blobs/{}", blob.source()), None)?;
         Ok(blob.wrap_reader(response.into_reader()))
     }
 
@@ -83,6 +83,8 @@ where
     fn send(&self, request: ureq::Request) -> Result<ureq::Response, HttpError> {
         let request = request.set("User-Agent", USER_AGENT);
 
+        self.event_handler.registry_request(request.url());
+
         let auth_token = self.auth_token.read().unwrap();
         if let Some(auth) = auth_token.as_deref() {
             return Ok(request.set("Authorization", auth).call()?);
@@ -92,7 +94,6 @@ where
         let mut auth_token = self.auth_token.write().unwrap();
 
         // Try a request with no token.
-        self.event_handler.registry_request(request.url());
 
         let response = match request.clone().call() {
             Ok(r) => return Ok(r),

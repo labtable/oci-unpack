@@ -3,16 +3,27 @@ use std::{fmt, str::FromStr};
 /// Generate the `MediaType` enum, its `FromStr` and `Display`
 /// implementations, and the associated constant `ALL` with all
 /// the valid values.
-macro_rules! define_media_types {
+macro_rules! media_types {
     ($($variant:ident = $mediatype:expr,)*) => {
+        /// Known media types.
         #[non_exhaustive]
         #[derive(Copy, Clone, PartialEq, Debug)]
         pub enum MediaType {
-            $($variant),*
+            $(
+                #[doc = concat!("Variant for `", $mediatype, "`.")]
+                $variant,
+            )*
         }
 
         impl MediaType {
-            pub const ALL: &[&str] = &[ $($mediatype),* ];
+            /// List with all known media types.
+            pub(crate) const ALL: &[&str] = &[ $($mediatype),* ];
+
+            pub fn as_str(&self) -> &'static str {
+                match self {
+                    $(MediaType::$variant => $mediatype,)*
+                }
+            }
         }
 
         impl FromStr for MediaType {
@@ -28,17 +39,13 @@ macro_rules! define_media_types {
 
         impl fmt::Display for MediaType {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                let display = match self {
-                    $(MediaType::$variant => $mediatype,)*
-                };
-
-                f.write_str(display)
+                f.write_str(self.as_str())
             }
         }
     }
 }
 
-define_media_types!(
+media_types!(
     DockerFsTarGzip = "application/vnd.docker.image.rootfs.diff.tar.gzip",
     DockerImageV1 = "application/vnd.docker.container.image.v1+json",
     DockerManifestList = "application/vnd.docker.distribution.manifest.list.v2+json",
@@ -46,7 +53,7 @@ define_media_types!(
     OciConfig = "application/vnd.oci.image.config.v1+json",
     OciFsTar = "application/vnd.oci.image.layer.v1.tar",
     OciFsTarGzip = "application/vnd.oci.image.layer.v1.tar+gzip",
-    OciManifestIndex = "application/vnd.oci.image.index.v1+json",
+    OciImageIndex = "application/vnd.oci.image.index.v1+json",
     OciManifestV1 = "application/vnd.oci.image.manifest.v1+json",
 );
 
@@ -58,7 +65,7 @@ impl<'de> serde::de::Visitor<'de> for MediaTypeVisitor {
     type Value = MediaType;
 
     fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-        formatter.write_str("Image/manifest type.")
+        formatter.write_str("Media type for OCI/Docker objects.")
     }
 
     fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
@@ -88,7 +95,7 @@ fn media_type_in_json() {
     assert!(matches!(
         serde_json::from_str(r#"{"mt": "application/vnd.oci.image.index.v1+json"}"#),
         Ok(Example {
-            mt: MediaType::OciManifestIndex
+            mt: MediaType::OciImageIndex
         })
     ));
 }

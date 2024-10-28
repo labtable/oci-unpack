@@ -5,31 +5,51 @@ use std::{
 
 use sha2::Digest as _;
 
+/// Algorithm to compute the hash value.
+///
+/// See [`Digest`] for an example.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Algorithm {
+#[non_exhaustive]
+pub enum DigestAlgorithm {
     SHA256,
     SHA512,
 }
 
+/// A digest to validate a blob.
+///
+/// It contains the algorithm (like `SHA256`) and its expected value as
+/// a hexadecimal string.
+///
+/// # Examples
+///
+/// ```
+/// # use oci_unpack::*;
+/// const DIGEST: &str = "123456789012345678901234567890123456789012345678901234567890ABCD";
+///
+/// let digest = Digest::try_from(format!("sha256:{}", DIGEST)).unwrap();
+/// assert_eq!(digest.algorithm(), DigestAlgorithm::SHA256);
+/// assert_eq!(digest.hash_value(), DIGEST);
+/// ```
 #[derive(Clone, Debug, PartialEq, serde::Deserialize)]
 #[serde(try_from = "String")]
 pub struct Digest {
     hash: String,
-    algorithm: Algorithm,
+    algorithm: DigestAlgorithm,
 }
 
+/// Errors from the digest parser.
 #[derive(thiserror::Error, Debug)]
-pub enum DigestParseError {
+pub enum DigestError {
     #[error("Invalid digest algorithm.")]
-    InvalidDigestAlgorithm,
+    InvalidAlgorithm,
 
-    #[error("Invalid digest.")]
-    InvalidDigest,
+    #[error("Invalid digest value.")]
+    InvalidValue,
 }
 
 impl Digest {
-    /// Return the original hash, which includes the `algorithm:` prefix.
-    pub fn hash(&self) -> &str {
+    /// Original string to build this instance (`algorithm:hash_value`).
+    pub fn source(&self) -> &str {
         &self.hash
     }
 
@@ -40,16 +60,20 @@ impl Digest {
             .unwrap_or_default()
     }
 
-    pub fn algorithm(&self) -> Algorithm {
+    pub fn algorithm(&self) -> DigestAlgorithm {
         self.algorithm
     }
 
-    /// Return a `Read` instance to compute the digest and verify
-    /// it when the stream is closed.
+    /// Return a `Read` instance to compute its digest.
+    ///
+    /// When all data from `reader` is consumed, it verifies that the
+    /// computed digest is the expected one. If not, it returns an
+    /// [`InvalidData`](::std::io::ErrorKind::InvalidData)
+    /// error.
     pub fn wrap_reader<R: Read>(&self, reader: R) -> impl Read {
         let hasher: Box<dyn digest::DynDigest> = match self.algorithm {
-            Algorithm::SHA256 => Box::new(sha2::Sha256::new()),
-            Algorithm::SHA512 => Box::new(sha2::Sha512::new()),
+            DigestAlgorithm::SHA256 => Box::new(sha2::Sha256::new()),
+            DigestAlgorithm::SHA512 => Box::new(sha2::Sha512::new()),
         };
 
         DigestReader {
@@ -61,16 +85,16 @@ impl Digest {
 }
 
 impl TryFrom<String> for Digest {
-    type Error = DigestParseError;
+    type Error = DigestError;
 
     fn try_from(hash: String) -> Result<Self, Self::Error> {
         let (algorithm, value, expected_size) = {
             if let Some(h) = hash.strip_prefix("sha256:") {
-                (Algorithm::SHA256, h, 256 / 8 * 2)
+                (DigestAlgorithm::SHA256, h, 256 / 8 * 2)
             } else if let Some(h) = hash.strip_prefix("sha512:") {
-                (Algorithm::SHA512, h, 512 / 8 * 2)
+                (DigestAlgorithm::SHA512, h, 512 / 8 * 2)
             } else {
-                return Err(DigestParseError::InvalidDigestAlgorithm);
+                return Err(DigestError::InvalidAlgorithm);
             }
         };
 
@@ -79,7 +103,7 @@ impl TryFrom<String> for Digest {
         if value.len() == expected_size && value.chars().all(|c| c.is_ascii_hexdigit()) {
             Ok(Digest { hash, algorithm })
         } else {
-            Err(DigestParseError::InvalidDigest)
+            Err(DigestError::InvalidValue)
         }
     }
 }
