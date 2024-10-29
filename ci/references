@@ -1,0 +1,23 @@
+# Images from multiple container registries
+
+# Docker Hub
+alpine:3.18
+busybox
+debian:stable
+nginx:perl
+nixos/nix
+
+# Codeberg
+codeberg.org/forgejo/forgejo:7
+
+# Amazon ECR Public
+public.ecr.aws/docker/library/python:3-slim
+public.ecr.aws/docker/library/ubuntu:16.04
+
+# Red Hat Quay
+quay.io/prometheus/prometheus
+quay.io/skopeo/stable
+
+# GitHub Container Registry
+ghcr.io/mainsail-crew/mainsail@sha256:d8c186d19a6df1e6e6a0050327ae30a375ff14308db22e8f40bc4f288b18bb46
+ghcr.io/prefix-dev/pixi@sha256:29137f0e1c992e08a4674a3e06737f4a2ee5335afc3639d11a9c9c42bc0a5a62

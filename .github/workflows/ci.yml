@@ -1,0 +1,84 @@
+name: ci
+on:
+  pull_request:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+
+  tests:
+    timeout-minutes: 30
+
+    runs-on: ubuntu-22.04
+
+    strategy:
+      fail-fast: false
+
+      matrix:
+        rust: [ 1.81, stable, beta ]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - run: uname -rm
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust }}
+          components: clippy
+
+      - run: cargo clippy --workspace
+
+      - run: cargo test --workspace
+
+  rustfmt:
+    timeout-minutes: 10
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          components: rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+  images:
+    timeout-minutes: 30
+
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - run: uname -rm
+
+      - name: Install packages
+        run: |
+            set -ex
+            sudo apt-get update -q
+            sudo apt-get install -y mtree-netbsd
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          components: clippy
+
+      - name: Build the unpack example.
+        run: |
+          set -xe
+
+          cargo install --example unpack --path . --root target
+
+          sudo install -s -t /usr/local/bin/ target/bin/unpack
+
+      - run: sudo ci/run-tests

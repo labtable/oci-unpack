@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+#
+# Run the `ci/compare-image` script against all references in
+# the `ci/references` file.
+
+set -euo pipefail
+
+SELF=$(realpath "$(dirname "$0")")
+
+failed=()
+
+exec < "$SELF/references"
+
+while read -sr line
+do
+    if [ -z "$line" ] || [ "${line:0:1}" = '#' ]
+    then
+        continue
+    fi
+
+    printf ' --- %q ---\n' "$line"
+
+    if ! "$SELF/compare-image" "$line"
+    then
+        printf ' --- Failed: %q\n' "$line"
+        failed+=("$line")
+    fi
+
+    printf '\n\n'
+done
+
+if [ ${#failed[@]} -gt 0 ]
+then
+    echo "Failed:"
+    printf ' - %s\n' "${failed[@]}"
+    exit 1
+fi

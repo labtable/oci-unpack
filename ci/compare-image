@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+#
+# Download an OCI image with both docker-pull and oci-unpack, and compare the
+# tarball from docker-export with the unpacked image.
+
+set -euo pipefail
+
+if [ $# -ne 1 ]
+then
+    echo "Usage: $0 <reference>"
+    exit 1
+fi
+
+REFERENCE=$1
+
+CONTAINER_ID=""
+
+WORKDIR=$(mktemp -d)
+
+
+run() {
+    ( set -x ; "$@" )
+}
+
+cleanup() {
+    rm -fr "$WORKDIR"
+
+    if [ -n "$CONTAINER_ID" ]
+    then
+        docker rm --force "$CONTAINER_ID" > /dev/null
+    fi
+}
+
+trap cleanup EXIT
+
+
+# Dependencies.
+for dep in docker jq mtree unpack
+do
+    if ! type -P $dep > /dev/null
+    then
+        printf '%s: not found.\n' "$dep"
+        exit 1
+    fi
+done
+
+
+# Pull the image to the local Docker.
+run docker pull --quiet "$REFERENCE"
+
+# Unpack it.
+run unpack "$REFERENCE" "$WORKDIR/unpack"
+
+# Create a container that just delete `/dev`. Some (very old) images
+# includes block/character devices, but oci-unpack does not support it.
+CONTAINER_ID=$(run docker create "$REFERENCE")
+
+# Extract container contents.
+mkdir "$WORKDIR/docker"
+run docker export "$CONTAINER_ID" \
+    | tar -C "$WORKDIR/docker" --numeric-owner -x
+
+
+# Create a directory specification from the tarball.
+keywords=(
+    uid
+    gid
+
+    mode
+    size
+    type
+
+    link
+    nlink
+
+    sha256
+)
+
+cd "$WORKDIR/docker"
+
+# Force the mtime for directories touched by docker-create.
+for path in . etc
+do
+    unpack_path="$WORKDIR/unpack/rootfs/$path"
+    if [ -d "$unpack_path" ]
+    then
+        touch -r "$path" "$unpack_path"
+    fi
+done
+
+# Exclude files modified by docker-create.
+#
+# Ref: https://github.com/moby/moby/blob/v27.3.1/daemon/initlayer/setup_unix.go#L23-L33
+exclude=(
+    ./.dockerenv
+    ./dev
+    ./etc/hostname
+    ./etc/hosts
+    ./etc/mtab
+    ./etc/resolv.conf
+    ./proc
+    ./sys
+)
+
+run mtree \
+    -c > "$WORKDIR/mtree" \
+    -X <(printf '%s\n' "${exclude[@]}") \
+    -K "$(printf %s, "${keywords[@]}")"
+
+# Validate the specification.
+run mtree \
+    -p "$WORKDIR/unpack/rootfs" \
+    -X <(printf '%s\n' "${exclude[@]}") \
+    -f "$WORKDIR/mtree"
