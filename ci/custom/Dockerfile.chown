@@ -1,0 +1,9 @@
+# Test chown in different layers.
+
+from alpine
+
+workdir /wd
+run echo $RANDOM > f0 && chown 3000:3001 f0
+
+run chown 4000 f0
+run chmod +s f0

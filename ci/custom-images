@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+#
+# Build images from the instructions in `ci/custom/Dockerfile.*` files.
+#
+# A local registry is started to published the new images.
+
+set -euo pipefail
+
+: "${REGISTRY_PORT:=5000}"
+
+REGISTRY_URL=127.0.0.1:$REGISTRY_PORT
+
+SELF=$(realpath "$(dirname "$0")")
+
+run() {
+    ( set -x ; "$@" )
+}
+
+
+# Move the current stdout to another file descriptor, and
+# replace it with stderr.
+#
+# Thus, the output from the build commands will not be mixed
+# with image references.
+exec {OUTPUT}<&1-
+exec 1>&2
+
+
+# Launch a Docker registry if it is not ready.
+if ! curl --silent --max-time 5 "$REGISTRY_URL"
+then
+    docker run --detach --publish 5000:5000 registry
+
+    for n in {1..20}
+    do
+        sleep "$n"
+
+        if curl --silent --max-time 5 "$REGISTRY_URL"
+        then
+            break
+        fi
+    done
+fi
+
+for dockerfile in "$SELF"/custom/Dockerfile.*
+do
+    id=$(sha256sum "$dockerfile" | head -c 12)
+    reference=$REGISTRY_URL/$id.${dockerfile//*.}:latest
+    run buildah build --layers=true --tag "$reference" --file "$dockerfile" "$SELF/custom"
+    run buildah push --tls-verify=false "$reference"
+
+    echo "$reference" >&$OUTPUT
+done

@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 #
-# Run the `ci/compare-image` script against all references in
-# the `ci/references` file.
+# Run the `ci/compare-image` script against a list of image references.
+#
+# Each reference is read from stdin. Empty lines, or lines prefixed with
+# the `#` character, are ignored.
 
 set -euo pipefail
 
 SELF=$(realpath "$(dirname "$0")")
 
 failed=()
-
-exec < "$SELF/references"
 
 while read -sr line
 do

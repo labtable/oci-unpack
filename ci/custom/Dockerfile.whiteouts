@@ -1,0 +1,9 @@
+# Remove files and recreate them in upper layers.
+
+from alpine:3.20
+
+workdir /etc
+
+run rm -fr ssl/ nsswitch.conf
+run rm -fr apk && mkdir apk && touch apk/keys
+run echo $RANDOM > apk/example

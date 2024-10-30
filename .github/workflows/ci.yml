@@ -81,4 +81,17 @@ jobs:
 
           sudo install -s -t /usr/local/bin/ target/bin/unpack
 
-      - run: sudo ci/run-tests
+      - name: Custom images.
+        run: |
+          set -xe
+
+          prefix() {
+              awk -v c="$1" -v p="$2" \
+                '{ print "\x1b[" c "m" p " | \x1b[m" $0; fflush() }'
+          }
+
+          sudo ci/custom-images 2> >(prefix 34 BUILD 1>&2) \
+            | sudo ci/run-tests &> >(prefix 35 TESTS)
+
+      - name: Images from registries.
+        run: sudo ci/run-tests < ci/references

@@ -1,0 +1,15 @@
+# Test symbolic/hard links.
+
+from alpine
+
+workdir /usr/bin
+run ln env env2
+
+workdir /0
+run head -c 8 /dev/urandom > rnd.data && ln rnd.data rnd.data2
+run chmod 522 rnd.data2
+
+workdir /1
+
+run ln -s ../../../../0 X
+run ln X/rnd.data2 .
