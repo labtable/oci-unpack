@@ -4,6 +4,7 @@ mod layers;
 
 use std::collections::BTreeMap;
 use std::io;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use crate::{digest::DigestError, reference::Reference, MediaType};
@@ -79,6 +80,14 @@ struct DirectoryMetadataEntry {
     mtime: u64,
     uid: Option<u32>,
     gid: Option<u32>,
+}
+
+impl DirectoryMetadataEntry {
+    /// Return a key to use with `DirectoryMetadata`
+    fn key(path: PathBuf) -> (usize, PathBuf) {
+        let path_len = path.as_os_str().as_bytes().len();
+        (usize::MAX - path_len, path)
+    }
 }
 
 /// Download an image and unpack its contents to a new directory.

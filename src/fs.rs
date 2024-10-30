@@ -1,13 +1,16 @@
 use std::{
+    ffi::OsStr,
     io,
     num::NonZeroUsize,
+    os::unix::ffi::OsStrExt,
     path::{Component, Path, PathBuf},
 };
 
 use rustix::{
     fd::{AsFd, BorrowedFd, OwnedFd},
     fs::{
-        chmodat, chownat, mkdirat, openat, openat2, AtFlags, Gid, Mode, OFlags, ResolveFlags, Uid,
+        chmodat, chownat, mkdirat, openat, openat2, unlinkat, AtFlags, Gid, Mode, OFlags,
+        ResolveFlags, Uid,
     },
     io::Errno,
     path::Arg,
@@ -231,6 +234,61 @@ pub fn change_owner(
                 Mode::from_bits_retain(mode),
                 AtFlags::empty(),
             )?;
+        }
+    }
+
+    Ok(())
+}
+
+#[derive(Copy, Clone, PartialEq)]
+pub enum RemovedEntry {
+    Directory,
+    Nothing,
+    Other,
+}
+
+/// Remove an entry in `parent_fd`.
+///
+/// If the entry is a directory, its contents will be also removed.
+///
+/// `NotFound` errors are ignored.
+pub fn remove_entry(parent_fd: BorrowedFd, path: &Path) -> io::Result<RemovedEntry> {
+    match unlinkat(parent_fd, path, AtFlags::empty()) {
+        Ok(()) => Ok(RemovedEntry::Other),
+
+        Err(Errno::ISDIR) => {
+            remove_subtree(parent_fd, path)?;
+
+            match unlinkat(parent_fd, path, AtFlags::REMOVEDIR) {
+                Err(Errno::NOENT) => Ok(RemovedEntry::Nothing),
+                Err(e) => Err(e.into()),
+                _ => Ok(RemovedEntry::Directory),
+            }
+        }
+
+        Err(Errno::NOENT) => Ok(RemovedEntry::Nothing),
+
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Remove the contents of the directory `path` beneath `parent_fd`.
+///
+/// The `path` itself is not removed.
+pub fn remove_subtree(parent_fd: BorrowedFd, path: &Path) -> io::Result<()> {
+    let subdir = openat2(
+        parent_fd,
+        path,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW,
+        Mode::empty(),
+        ResolveFlags::BENEATH,
+    )?;
+
+    let mut entries = rustix::fs::Dir::read_from(&subdir)?;
+    while let Some(Ok(entry)) = entries.read() {
+        let name = entry.file_name().to_bytes();
+        if name != b"." && name != b".." {
+            remove_entry(subdir.as_fd(), Path::new(OsStr::from_bytes(name)))?;
         }
     }
 

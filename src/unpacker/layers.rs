@@ -35,7 +35,7 @@ pub(crate) fn unpack_layer<E: EventHandler>(
     target: &Directory,
     blob: &Blob,
     mut tarball: File,
-    dirs_mtimes: &mut DirectoryMetadata,
+    dirs_metadata: &mut DirectoryMetadata,
 ) -> Result<(), UnpackError> {
     let archive_len = try_io!(blob_id, {
         let len = tarball.seek(io::SeekFrom::End(0))?;
@@ -69,7 +69,7 @@ pub(crate) fn unpack_layer<E: EventHandler>(
     event_handler.layer_start(archive_len);
 
     let mut archive = tar::Archive::new(reader);
-    let mut ctx = Context::new(event_handler, blob_id, target, dirs_mtimes);
+    let mut ctx = Context::new(event_handler, blob_id, target, dirs_metadata);
 
     for entry in try_io!(blob_id, archive.entries()) {
         event_handler.layer_progress(tarball_position.get());
@@ -108,7 +108,7 @@ struct Context<'a, E> {
     blob_id: &'a str,
     target: &'a Directory,
     dirs_cache: DirFdCache<'a>,
-    dirs_mtimes: &'a mut DirectoryMetadata,
+    dirs_metadata: &'a mut DirectoryMetadata,
     cached_link_dirfd: Option<(PathBuf, OwnedFd)>,
 }
 
@@ -117,14 +117,14 @@ impl<'a, E: EventHandler> Context<'a, E> {
         event_handler: &'a E,
         blob_id: &'a str,
         target: &'a Directory,
-        dirs_mtimes: &'a mut DirectoryMetadata,
+        dirs_metadata: &'a mut DirectoryMetadata,
     ) -> Self {
         Self {
             event_handler,
             blob_id,
             target,
             dirs_cache: DirFdCache::new(target),
-            dirs_mtimes,
+            dirs_metadata,
             cached_link_dirfd: None,
         }
     }
@@ -204,8 +204,7 @@ impl<'a, E: EventHandler> Context<'a, E> {
             let (mut path, b) = normalize_path(entry.path()?)?;
             path.push(b);
 
-            let path_len = path.as_os_str().as_bytes().len();
-            let key = (usize::MAX - path_len, path);
+            let key = super::DirectoryMetadataEntry::key(path);
             let entry = super::DirectoryMetadataEntry {
                 mode: Mode::from_bits_retain(header.mode()?),
                 mtime,
@@ -213,7 +212,7 @@ impl<'a, E: EventHandler> Context<'a, E> {
                 gid,
             };
 
-            self.dirs_mtimes.insert(key, entry);
+            self.dirs_metadata.insert(key, entry);
         }
 
         Ok(())
@@ -229,7 +228,8 @@ impl<'a, E: EventHandler> Context<'a, E> {
 
         let mode = Mode::from_bits_retain(entry.header().mode()? & 0o7777);
 
-        let parent_fd = self.path_fd(parent_path)?;
+        let parent_path = parent_path.as_ref();
+        let parent_fd = self.dirs_cache.get(parent_path, true)?;
 
         let mut output = loop {
             let result = fs::openat2(
@@ -244,7 +244,15 @@ impl<'a, E: EventHandler> Context<'a, E> {
                 Ok(f) => break File::from(f),
 
                 Err(e) if e.kind() == AlreadyExists => {
-                    fs::unlinkat(parent_fd, file_name, fs::AtFlags::empty())?;
+                    let removed = crate::fs::remove_entry(parent_fd, file_name)?;
+
+                    // Remove the entry from dirs_metadata if the entry
+                    // was a directory.
+                    if removed == crate::fs::RemovedEntry::Directory {
+                        let path = parent_path.join(file_name);
+                        let key = super::DirectoryMetadataEntry::key(path);
+                        self.dirs_metadata.remove(&key);
+                    }
                 }
 
                 Err(e) => return Err(e.into()),
@@ -390,55 +398,14 @@ impl<'a, E: EventHandler> Context<'a, E> {
     ///
     /// [1]: https://github.com/opencontainers/image-spec/blob/v1.0/layer.md#whiteouts
     fn process_whiteout(dir: BorrowedFd, whiteout: &[u8]) -> io::Result<()> {
-        use rustix::fs;
-
-        fn remove(dir: BorrowedFd, path: &Path) -> io::Result<()> {
-            // Try to remove the file with `unlinkat`. If it fails
-            // because path is a directory, remove its children and
-            // then the directory itself.
-            //
-            // NotFound errors are ignored.
-
-            match fs::unlinkat(dir, path, fs::AtFlags::empty()) {
-                Err(e) if e.raw_os_error() == libc::EISDIR => (),
-                Err(e) if e.raw_os_error() == libc::ENOENT => return Ok(()),
-                result => return Ok(result?),
-            }
-
-            remove_subtree(dir, path)?;
-
-            match fs::unlinkat(dir, path, fs::AtFlags::REMOVEDIR) {
-                Err(e) if e.raw_os_error() != libc::ENOENT => Err(e.into()),
-                _ => Ok(()),
-            }
-        }
-
-        fn remove_subtree(dir: BorrowedFd, path: &Path) -> io::Result<()> {
-            let subdir = fs::openat2(
-                dir,
-                path,
-                fs::OFlags::RDONLY | fs::OFlags::DIRECTORY | fs::OFlags::NOFOLLOW,
-                Mode::empty(),
-                fs::ResolveFlags::BENEATH,
-            )?;
-
-            let mut entries = fs::Dir::read_from(&subdir)?;
-            while let Some(Ok(entry)) = entries.read() {
-                let name = entry.file_name().to_bytes();
-                if name != b"." && name != b".." {
-                    remove(subdir.as_fd(), Path::new(OsStr::from_bytes(name)))?;
-                }
-            }
-
-            Ok(())
-        }
-
         let path = Path::new(OsStr::from_bytes(whiteout));
 
         if whiteout == WHITEOUT_OPAQUE {
-            remove_subtree(dir, Path::new("."))
+            crate::fs::remove_subtree(dir, Path::new("."))?;
         } else {
-            remove(dir, path)
+            crate::fs::remove_entry(dir, path)?;
         }
+
+        Ok(())
     }
 }
