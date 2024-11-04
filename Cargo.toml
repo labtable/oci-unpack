@@ -5,12 +5,12 @@ edition = "2021"
 authors = ["ayosec@gmail.com"]
 license = "Apache-2.0"
 
-description = "Download and unpack OCI layers."
-keywords = ["bash"]
+description = "Download and unpack OCI images."
+keywords = ["container-image", "oci"]
 
 readme = "README.md"
 documentation = "https://docs.rs/oci-unpack"
-repository = "https://github.com/ayosec/oci-unpack"
+repository = "https://github.com/lab-tool/oci-unpack"
 
 [dependencies]
 digest = { version = "0.10.7", default-features = false }
