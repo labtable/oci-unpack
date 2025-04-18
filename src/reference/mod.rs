@@ -128,7 +128,7 @@ enum RepositoryInner<'a> {
     Components(&'a str, &'a str),
 }
 
-impl<'a> std::fmt::Display for Repository<'a> {
+impl std::fmt::Display for Repository<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.0 {
             RepositoryInner::Full(full) => f.write_str(full),

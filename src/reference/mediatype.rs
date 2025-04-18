@@ -62,7 +62,7 @@ pub struct InvalidMediaType;
 
 struct MediaTypeVisitor;
 
-impl<'de> serde::de::Visitor<'de> for MediaTypeVisitor {
+impl serde::de::Visitor<'_> for MediaTypeVisitor {
     type Value = MediaType;
 
     fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
