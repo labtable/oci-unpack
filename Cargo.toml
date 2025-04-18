@@ -1,6 +1,6 @@
 [package]
 name = "oci-unpack"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["ayosec@gmail.com"]
 license = "Apache-2.0"
@@ -10,7 +10,7 @@ keywords = ["container-image", "oci"]
 
 readme = "README.md"
 documentation = "https://docs.rs/oci-unpack"
-repository = "https://github.com/lab-tool/oci-unpack"
+repository = "https://github.com/labtable/oci-unpack"
 
 [dependencies]
 digest = { version = "0.10.7", default-features = false }
