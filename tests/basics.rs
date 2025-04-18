@@ -15,14 +15,14 @@ fn multiple_layers_test() {
 
     let layers = vec![
         // Layer with regular files.
-        Blob::archive(true)
+        Blob::archive(MediaType::OciFsTarGzip)
             .directory("abc")
             .regular("abc/def", "a1")
             .regular("./0/1", "a2")
             .build(),
         //
         // Layer trying to escape from rootfs;
-        Blob::archive(false)
+        Blob::archive(MediaType::OciFsTar)
             .directory("dot0/dot1")
             .symlink("dot0/dot2", "../../../../../dot0/dot1")
             .regular("./dot0/dot2/file", "b1")
@@ -30,18 +30,24 @@ fn multiple_layers_test() {
         //
         // Whiteouts. First, create some files in a layer, that will
         // be removed in the next one.
-        Blob::archive(false)
+        Blob::archive(MediaType::OciFsTar)
             .regular("w/0/1", "w1")
             .regular("w/0/2", "w2")
             .regular("w/1/3", "w3")
             .regular("w/1/4", "w4")
             .regular("w/2/5", "w5")
             .build(),
-        Blob::archive(true)
+        Blob::archive(MediaType::OciFsTarGzip)
             .regular("w/0/.wh.1", "")
             .regular("w/0/.wh.must-be-ignored", "")
             .regular("w/1/.wh..wh..opq", "")
             .regular("w/.wh.2", "")
+            .build(),
+        //
+        // A layer compressed with zstd.
+        #[cfg(feature = "zstd")]
+        Blob::archive(MediaType::OciFsTarZstd)
+            .regular("from.zstd", "01234")
             .build(),
     ];
 
@@ -86,4 +92,8 @@ fn multiple_layers_test() {
         .unwrap()
         .next()
         .is_none());
+
+    // Files from a zstd layer
+    #[cfg(feature = "zstd")]
+    assert_eq!(read!("rootfs/from.zstd"), b"01234");
 }

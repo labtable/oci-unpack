@@ -53,6 +53,7 @@ media_types!(
     OciConfig = "application/vnd.oci.image.config.v1+json",
     OciFsTar = "application/vnd.oci.image.layer.v1.tar",
     OciFsTarGzip = "application/vnd.oci.image.layer.v1.tar+gzip",
+    OciFsTarZstd = "application/vnd.oci.image.layer.v1.tar+zstd",
     OciImageIndex = "application/vnd.oci.image.index.v1+json",
     OciManifestV1 = "application/vnd.oci.image.manifest.v1+json",
 );

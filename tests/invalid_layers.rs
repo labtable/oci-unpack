@@ -29,15 +29,31 @@ fn run_test(layers: Vec<Blob>) {
 #[test]
 fn whiteout_parent() {
     run_test(vec![
-        Blob::archive(false).regular("w/0/1", "w1").build(),
-        Blob::archive(true).regular("w/0/.wh...", "").build(),
+        Blob::archive(MediaType::OciFsTar)
+            .regular("w/0/1", "w1")
+            .build(),
+        Blob::archive(MediaType::OciFsTarGzip)
+            .regular("w/0/.wh...", "")
+            .build(),
     ]);
 }
 
 #[test]
 fn whiteout_current_dir() {
     run_test(vec![
-        Blob::archive(false).regular("w/0/1", "w1").build(),
-        Blob::archive(true).regular("w/0/.wh..", "").build(),
+        Blob::archive(MediaType::OciFsTar)
+            .regular("w/0/1", "w1")
+            .build(),
+        Blob::archive(MediaType::OciFsTarGzip)
+            .regular("w/0/.wh..", "")
+            .build(),
     ]);
+}
+
+#[cfg(not(feature = "zstd"))]
+#[test]
+fn reject_zstd_layers() {
+    run_test(vec![Blob::archive(MediaType::OciFsTarZstd)
+        .regular("a", "b")
+        .build()]);
 }

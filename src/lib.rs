@@ -32,7 +32,6 @@
 //! the download/unpack process. The file `examples/unpack.rs` in the repository
 //! has a full implementation of a handler.
 //!
-//!
 //! # Sandbox
 //!
 //! Before creating any file in the target directory, [`Unpacker::unpack`] tries
@@ -44,6 +43,10 @@
 //!
 //! The sandbox is only available if the crate is built with the `sandbox` feature, which
 //! is enabled by default.
+//!
+//! # Zstd Compression
+//!
+//! The `zstd` feature (enabled by default) is required to support images compressed with zstd.
 
 mod digest;
 mod fs;

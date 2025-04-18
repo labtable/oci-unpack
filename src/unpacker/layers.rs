@@ -61,6 +61,14 @@ pub(crate) fn unpack_layer<E: EventHandler>(
             Box::new(flate2::read::GzDecoder::new(tarball))
         }
 
+        #[cfg(feature = "zstd")]
+        MediaType::OciFsTarZstd => {
+            let reader = zstd::stream::read::Decoder::new(tarball)
+                .map_err(|e| UnpackError::Io(e, format!("blob:{blob_id}").into()))?;
+
+            Box::new(reader)
+        }
+
         MediaType::OciFsTar => Box::new(BufReader::new(tarball)),
 
         unknown => return Err(UnpackError::InvalidContentType(unknown)),

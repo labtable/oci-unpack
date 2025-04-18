@@ -40,20 +40,22 @@ impl Blob {
         }
     }
 
-    /// Return a build to create an archive.
-    pub fn archive(compressed: bool) -> BlobArchive {
+    /// Return a builder to create an archive.
+    pub fn archive(media_type: MediaType) -> BlobArchive {
         let buffer = SharedBuffer(Rc::new(Vec::with_capacity(4096).into()));
 
-        let media_type;
-        let stream: Box<dyn Write>;
+        let stream: Box<dyn Write> = match media_type {
+            MediaType::OciFsTarGzip => Box::new(GzEncoder::new(buffer.clone(), Default::default())),
 
-        if compressed {
-            media_type = MediaType::OciFsTarGzip;
-            stream = Box::new(GzEncoder::new(buffer.clone(), Default::default()));
-        } else {
-            media_type = MediaType::OciFsTar;
-            stream = Box::new(buffer.clone());
-        }
+            #[cfg(feature = "zstd")]
+            MediaType::OciFsTarZstd => Box::new(
+                zstd::stream::write::Encoder::new(buffer.clone(), 0)
+                    .unwrap()
+                    .auto_finish(),
+            ),
+
+            _ => Box::new(buffer.clone()),
+        };
 
         BlobArchive {
             media_type,
