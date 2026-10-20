@@ -27,9 +27,6 @@ const QUEUE_LIMIT: usize = 8;
 /// File to store the configuration.
 const CONFIG_PATH: &str = "config.json";
 
-/// Directory to store layers.
-const ROOTFS_PATH: &str = "rootfs";
-
 pub(crate) fn get<E: EventHandler>(
     http_client: crate::http::Client<E>,
     manifest: Manifest,
@@ -79,8 +76,8 @@ pub(crate) fn get<E: EventHandler>(
         // Get downloaded files and extract them.
 
         let rootfs = Directory::from(try_io!(
-            ROOTFS_PATH,
-            target.open_directory(ROOTFS_PATH, true)
+            super::ROOTFS_PATH,
+            target.open_directory(super::ROOTFS_PATH, true)
         ));
 
         let mut dirs_mtimes = Default::default();

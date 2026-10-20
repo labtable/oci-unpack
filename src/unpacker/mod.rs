@@ -11,6 +11,9 @@ use crate::{digest::DigestError, reference::Reference, MediaType};
 
 pub use event_handler::{EventHandler, NoEventHandler};
 
+/// Directory to store layers.
+const ROOTFS_PATH: &str = "rootfs";
+
 /// Errors from [`Unpacker::unpack`].
 #[derive(thiserror::Error, Debug)]
 pub enum UnpackError {
@@ -190,7 +193,14 @@ impl<'a, E: EventHandler> Unpacker<'a, E> {
             return std::fs::create_dir_all(path);
         }
 
-        if std::fs::read_dir(path)?.next().is_some() {
+        // Allow for the rootfs directory to already exist (as long as it is empty)
+        let root_fs = path.join(ROOTFS_PATH);
+        let root_fs_empty = root_fs.is_dir() && std::fs::read_dir(&root_fs)?.count() == 0;
+
+        if std::fs::read_dir(path)?
+            .filter_map(Result::ok)
+            .any(|e| e.file_name() != ROOTFS_PATH || !root_fs_empty)
+        {
             // Use `ErrorKind::DirectoryNotEmpty` when the
             // feature `io_error_more` is stabilized.
             return Err(io::Error::from_raw_os_error(libc::ENOTEMPTY));
