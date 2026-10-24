@@ -136,7 +136,7 @@ impl<'a> DirFdCache<'a> {
     }
 
     /// Get a file descriptor for a directory.
-    pub fn get<P>(&mut self, path: P, create: bool) -> Result<BorrowedFd, Errno>
+    pub fn get<P>(&mut self, path: P, create: bool) -> Result<BorrowedFd<'_>, Errno>
     where
         P: AsRef<Path>,
     {
