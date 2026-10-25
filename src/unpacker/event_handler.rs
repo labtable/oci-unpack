@@ -6,12 +6,12 @@ use std::{fmt::Display, path::Path};
 #[expect(unused_variables)]
 pub trait EventHandler: Sync + 'static {
     /// HTTP request to the registry.
-    fn registry_request(&self, url: &str) {}
+    fn registry_request(&self, url: &http::Uri) {}
 
     /// Registry requires an [authentication token][token].
     ///
     /// [token]: https://distribution.github.io/distribution/spec/auth/token/
-    fn registry_auth(&self, url: &str) {}
+    fn registry_auth(&self, url: &http::Uri) {}
 
     /// Start to download the blobs of the image.
     ///

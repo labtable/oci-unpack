@@ -66,14 +66,16 @@ pub(super) fn get<E: EventHandler>(
         let response = http_client.get(&format!("manifests/{}", path), Some(&accept))?;
 
         let content_type = response
-            .header("Content-Type")
+            .headers()
+            .get("content-type")
+            .and_then(|h| h.to_str().ok())
             .and_then(|h| MediaType::from_str(h).ok())
             .ok_or(UnpackError::MissingContentType)?;
 
         // If we have an expected digest, compute it during the download,
         // and verify it when the download is completed.
         let mut body: Box<dyn Read> = {
-            let response = response.into_reader();
+            let response = response.into_body().into_reader();
             match &tag {
                 Tag::D(d) => Box::new(BufReader::new(d.wrap_reader(response))),
                 Tag::S(_) => Box::new(response),

@@ -120,13 +120,13 @@ impl Logger {
 }
 
 impl EventHandler for Logger {
-    fn registry_request(&self, url: &str) {
+    fn registry_request(&self, url: &http::Uri) {
         if self.debug {
             println!("GET {url}");
         }
     }
 
-    fn registry_auth(&self, url: &str) {
+    fn registry_auth(&self, url: &http::Uri) {
         if self.debug {
             println!("AUTH {url}");
         }

@@ -18,7 +18,7 @@ jobs:
       fail-fast: false
 
       matrix:
-        rust: [ 1.81, stable, beta ]
+        rust: [ 1.96, stable, beta ]
 
     steps:
       - uses: actions/checkout@v4

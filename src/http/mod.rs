@@ -3,12 +3,18 @@ mod tests;
 
 use std::{io::Read, net::SocketAddr, str::FromStr, sync::RwLock};
 
+use http::{Request, Response};
+use ureq::{typestate::WithoutBody, RequestBuilder};
+
 use crate::{digest::Digest, EventHandler, Reference};
 
 const USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
 
 #[derive(thiserror::Error, Debug)]
 pub enum HttpError {
+    #[error("{0}")]
+    HttpMessage(#[from] Box<http::Error>),
+
     #[error("{0}")]
     Client(#[from] Box<ureq::Error>),
 
@@ -25,7 +31,20 @@ impl From<ureq::Error> for HttpError {
     }
 }
 
+impl From<http::header::InvalidHeaderValue> for HttpError {
+    fn from(value: http::header::InvalidHeaderValue) -> Self {
+        HttpError::HttpMessage(Box::new(value.into()))
+    }
+}
+
+impl From<http::Error> for HttpError {
+    fn from(value: http::Error) -> Self {
+        HttpError::HttpMessage(Box::new(value))
+    }
+}
+
 pub(super) struct Client<'a, E> {
+    agent: ureq::Agent,
     event_handler: &'a E,
     auth_token: RwLock<Option<String>>,
     host: String,
@@ -50,7 +69,14 @@ where
             reference.repository
         );
 
+        let agent = ureq::Agent::config_builder()
+            .user_agent(USER_AGENT)
+            .http_status_as_error(false)
+            .build()
+            .into();
+
         Client {
+            agent,
             event_handler,
             auth_token: Default::default(),
             host,
@@ -60,34 +86,33 @@ where
     /// Send a `GET` request to the registry.
     ///
     /// The path must not include the `v2/$image` prefix.
-    pub fn get(&self, path: &str, accept: Option<&str>) -> Result<ureq::Response, HttpError> {
+    pub fn get(&self, path: &str, accept: Option<&str>) -> Result<Response<ureq::Body>, HttpError> {
         let url = format!("{}/{}", self.host, path);
-        let mut request = ureq::get(&url);
+        let mut request = Request::get(&url);
         if let Some(accept) = accept {
-            request = request.set("Accept", accept);
+            request = request.header("Accept", accept);
         }
 
-        self.send(request)
+        self.send(request.body(())?)
     }
 
     /// Send a `GET` request to download a blob.
     pub fn download_blob(&self, blob: &Digest) -> Result<impl Read, HttpError> {
         let response = self.get(&format!("blobs/{}", blob.source()), None)?;
-        Ok(blob.wrap_reader(response.into_reader()))
+        Ok(blob.wrap_reader(response.into_body().into_reader()))
     }
 
     /// Send a request to the registry.
     ///
     /// If it responds with a `401` error, get the token from the
     /// URL in the `WWW-Authenticate` header.
-    fn send(&self, request: ureq::Request) -> Result<ureq::Response, HttpError> {
-        let request = request.set("User-Agent", USER_AGENT);
-
-        self.event_handler.registry_request(request.url());
+    fn send(&self, mut request: Request<()>) -> Result<Response<ureq::Body>, HttpError> {
+        self.event_handler.registry_request(request.uri());
 
         let auth_token = self.auth_token.read().unwrap();
         if let Some(auth) = auth_token.as_deref() {
-            return Ok(request.set("Authorization", auth).call()?);
+            request.headers_mut().append("Authorization", auth.parse()?);
+            return Ok(self.agent.run(request)?);
         }
 
         drop(auth_token);
@@ -95,9 +120,9 @@ where
 
         // Try a request with no token.
 
-        let response = match request.clone().call() {
+        let response = match self.agent.run(request.clone()) {
+            Ok(r) if r.status().as_u16() == 401 => r,
             Ok(r) => return Ok(r),
-            Err(ureq::Error::Status(401, r)) => r,
             Err(e) => return Err(e.into()),
         };
 
@@ -108,13 +133,16 @@ where
         // `token` or `access_token`.
 
         let Some(auth_request) = response
-            .header("www-authenticate")
-            .and_then(build_auth_request)
+            .headers()
+            .get("www-authenticate")
+            .and_then(|auth| build_auth_request(self.agent.clone(), auth.as_bytes()))
         else {
-            return Err(ureq::Error::Status(401, response).into());
+            return Err(ureq::Error::StatusCode(401).into());
         };
 
-        self.event_handler.registry_auth(auth_request.url());
+        if let Some(uri) = auth_request.uri_ref() {
+            self.event_handler.registry_auth(uri);
+        }
 
         #[derive(serde::Deserialize, Debug)]
         struct Tokens {
@@ -122,14 +150,15 @@ where
             access_token: Option<String>,
         }
 
-        let mut token = match serde_json::from_reader(auth_request.call()?.into_reader())? {
-            Tokens { token: Some(t), .. } => t,
-            Tokens {
-                access_token: Some(t),
-                ..
-            } => t,
-            _ => return Err(HttpError::MissingTokens),
-        };
+        let mut token =
+            match serde_json::from_reader(auth_request.call()?.into_body().into_reader())? {
+                Tokens { token: Some(t), .. } => t,
+                Tokens {
+                    access_token: Some(t),
+                    ..
+                } => t,
+                _ => return Err(HttpError::MissingTokens),
+            };
 
         token.insert_str(0, "Bearer ");
         *auth_token = Some(token);
@@ -167,10 +196,10 @@ fn guess_scheme(registry: &str) -> &'static str {
 ///
 /// See <https://distribution.github.io/distribution/spec/auth/token/>
 /// for more details.
-fn build_auth_request(auth_spec: &str) -> Option<ureq::Request> {
+fn build_auth_request(agent: ureq::Agent, auth_spec: &[u8]) -> Option<RequestBuilder<WithoutBody>> {
     let mut request = None;
     let mut pending_params = vec![];
-    let mut tail = auth_spec;
+    let mut tail = std::str::from_utf8(auth_spec).ok()?;
 
     // The first token must be `Bearer`
     tail = tail.strip_prefix("Bearer ")?;
@@ -184,7 +213,7 @@ fn build_auth_request(auth_spec: &str) -> Option<ureq::Request> {
             request = Some(
                 pending_params
                     .drain(..)
-                    .fold(ureq::get(value), |r, (k, v)| r.query(k, v)),
+                    .fold(agent.get(value), |r, (k, v)| r.query(k, v)),
             );
         } else {
             match request.take() {

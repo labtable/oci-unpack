@@ -220,8 +220,8 @@ pub fn change_owner(
     let result = chownat(
         parent_fd,
         file_name,
-        uid.map(|id| unsafe { Uid::from_raw(id) }),
-        gid.map(|id| unsafe { Gid::from_raw(id) }),
+        uid.map(Uid::from_raw),
+        gid.map(Gid::from_raw),
         AtFlags::SYMLINK_NOFOLLOW,
     );
 

@@ -103,7 +103,7 @@ fn request_token_after_unauthorized() {
 
     let response = client.get("test", None).expect("GET /test");
     assert!(matches!(
-        response.into_string().as_deref(),
+        response.into_body().read_to_string().as_deref(),
         Ok("token=Bearer 00AA11BB")
     ));
 }
