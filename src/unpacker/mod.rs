@@ -157,7 +157,8 @@ impl<'a, E: EventHandler> Unpacker<'a, E> {
     /// Download the image of `reference`, and unpack its contents to the
     /// directory `target`.
     ///
-    /// If `target` exists, it must be empty.
+    /// If `target` exists, it must be empty, or contain only an empty `rootfs`
+    /// directory.
     ///
     /// Before unpacking the layers, it tries to create a sandbox to restrict
     /// the write access to the `target` directory. If the sandbox can't be
@@ -185,28 +186,35 @@ impl<'a, E: EventHandler> Unpacker<'a, E> {
         images::get(client, manifest, target, &self.event_handler)
     }
 
-    /// Check if the `target` directory is empty.
+    /// Check if the `target` directory is empty, or contain an empty `rootfs`.
     ///
     /// The directory is created if it does not exist.
     fn check_empty_dir(path: &Path) -> io::Result<()> {
+        use std::fs::read_dir;
+
         if !path.exists() {
             return std::fs::create_dir_all(path);
         }
 
-        // Allow for the rootfs directory to already exist (as long as it is empty)
-        let root_fs = path.join(ROOTFS_PATH);
-        let root_fs_empty = root_fs.is_dir() && std::fs::read_dir(&root_fs)?.count() == 0;
+        let mut entries = read_dir(path)?;
+        let first = match entries.next() {
+            Some(e) => e?,
+            None => {
+                return Ok(()); // Empty directory.
+            }
+        };
 
-        if std::fs::read_dir(path)?
-            .filter_map(Result::ok)
-            .any(|e| e.file_name() != ROOTFS_PATH || !root_fs_empty)
+        if first.file_name() == ROOTFS_PATH
+            && first.file_type()?.is_dir()
+            && entries.next().is_none()
         {
-            // Use `ErrorKind::DirectoryNotEmpty` when the
-            // feature `io_error_more` is stabilized.
-            return Err(io::Error::from_raw_os_error(libc::ENOTEMPTY));
+            // If `rootfs` exists, it must be empty.
+            if read_dir(path.join(ROOTFS_PATH))?.next().is_none() {
+                return Ok(());
+            }
         }
 
-        Ok(())
+        Err(io::Error::from(io::ErrorKind::DirectoryNotEmpty))
     }
 
     /// Restrict filesystem access to the `target` directory.
