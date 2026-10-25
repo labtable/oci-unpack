@@ -9,6 +9,8 @@ set -euo pipefail
 
 SELF=$(realpath "$(dirname "$0")")
 
+LOGFILE=$(mktemp)
+
 failed=()
 
 while read -sr line
@@ -20,10 +22,15 @@ do
 
     printf ' --- %q ---\n' "$line"
 
-    if ! "$SELF/compare-image" "$line"
+    if ! "$SELF/compare-image" "$line" |& tee "$LOGFILE"
     then
-        printf ' --- Failed: %q\n' "$line"
-        failed+=("$line")
+        if grep --quiet --ignore-case 'TooManyRequests' "$LOGFILE"
+        then
+            echo "::warning::[SKIP] TooManyRequests in '$line'"
+        else
+            printf ' --- Failed: %q\n' "$line"
+            failed+=("$line")
+        fi
     fi
 
     printf '\n\n'
